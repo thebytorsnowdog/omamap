@@ -201,6 +201,21 @@ function fixtures() {
     assert.doesNotMatch(r.policy, /unsafe-eval|unsafe-inline|\*/);
   });
 
+  await check("oversized files are refused before they are read into memory", async () => {
+    // Loose shapefile parts used to be read whole, whatever their size.
+    const r = await page.evaluate(async () => {
+      const read = [];
+      const big = (name) => ({ name: name, size: 5 * 1024 * 1024 * 1024, arrayBuffer: () => { read.push(name); return Promise.resolve(new ArrayBuffer(8)); } });
+      const before = document.querySelectorAll(".toast.err").length;
+      await handleFiles([big("huge.geojson"), big("huge.zip"), big("roads.shp"), big("roads.dbf")]);
+      const toasts = Array.from(document.querySelectorAll(".toast.err")).slice(before).map((t) => t.textContent);
+      return { read: read, toasts: toasts };
+    });
+    assert.deepEqual(r.read, []);
+    assert.equal(r.toasts.length, 3, JSON.stringify(r.toasts));
+    assert.ok(r.toasts.every((t) => /too large/.test(t)), JSON.stringify(r.toasts));
+  });
+
   await check("only basemap tile hosts were contacted", async () => {
     const hosts = Array.from(new Set(requests.map((u) => new URL(u).host)));
     assert.deepEqual(hosts.filter((h) => !TILE_HOSTS.includes(h)), []);

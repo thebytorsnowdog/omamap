@@ -837,6 +837,10 @@ async function parseOne(file) {
 
 async function parseShapefileSet(stem, group) {
   const parts = {};
+  // Check sizes before reading anything into memory, as parseOne does.
+  for (const ext of Object.keys(group)) {
+    if (typeof group[ext].size === "number" && group[ext].size > OmaParse.LIMITS.fileBytes) throw new Error("Shapefile part ." + ext + " is too large (limit " + Math.round(OmaParse.LIMITS.fileBytes / 1048576) + " MiB).");
+  }
   for (const ext of Object.keys(group)) parts[ext] = await readBuffer(group[ext]);
   return Parser.run({ kind: "shapefile-set", name: stem, parts: parts }, Object.values(parts));
 }
