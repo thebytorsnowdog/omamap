@@ -1,6 +1,6 @@
 # OmaMap
 
-View spatial data on Omarchy. Drop in GeoJSON, KML, GPX, CSV or shapefiles, see them over street, topo or satellite maps, and click any feature to read its attributes.
+View spatial data on Omarchy. Drop in GeoJSON, KML, GPX, CSV or shapefiles, see them over street, topo or satellite maps, click any feature to read its attributes, and browse each dataset as a table.
 
 OmaMap follows your Omarchy theme. Its colours, font and light/dark basemap change when you switch theme.
 
@@ -21,8 +21,32 @@ Running `omamap file` again sends the file to the open window. You can also drag
 | click | Select the feature under the cursor |
 | <kbd>[</kbd> <kbd>]</kbd> | Step through stacked features at the clicked spot |
 | <kbd>Z</kbd> | Zoom to the selected feature |
+| <kbd>T</kbd> | Open / close the attribute table |
+| <kbd>L</kbd> | Collapse / expand the legend |
 | <kbd>/</kbd> | Filter the selected feature's attributes |
 | <kbd>Esc</kbd> | Leave the filter box, then clear the selection |
+
+### Styling datasets
+
+Each dataset gets a colour from your theme. The ◐ button on a dataset opens its style settings: colour, opacity, line or outline width, point size and outline (same as fill, light, dark or none).
+
+**Colour by** colours features by one of their fields, and a legend appears on the map:
+
+- **Each value:** one colour per distinct value (up to 24; the rest are grouped as "Other"). Fields whose values all have an obvious meaning use your theme's green, yellow and red. Examples: Yes/No, Completed/Pending/Overdue, In service/Out of service/Planned. Small numeric codes, such as condition grades 1–5, use an ordered colour ramp.
+- **Number ranges:** up to five ranges, each holding a similar number of features, for continuous numbers such as risk scores or lengths. The ramp can be reversed.
+
+Empty values are counted separately as "Missing". Class colours follow your theme, so they change when you switch theme.
+
+### Attribute table
+
+▦ on a dataset (or <kbd>T</kbd>) opens its full table under the map. Drag the top edge to resize it.
+
+- Click a column heading to sort (again to reverse, a third time to clear).
+- Search across all values, or tick **In view only** to list just the features in the current map view.
+- Click a row to select the feature and bring it into view. Double-click, or press <kbd>Enter</kbd>, to zoom to it. <kbd>↑</kbd> <kbd>↓</kbd> step through rows.
+- Selecting a feature on the map highlights its row.
+
+The table draws only the rows on screen, so it stays quick with large datasets.
 
 ### Formats
 
@@ -106,7 +130,7 @@ tests/host-smoke.sh         # headless checks of the native host (run test:brows
 npm run serve               # core/ at http://127.0.0.1:8765 for quick UI work
 ```
 
-`OMAMAP_DEBUG=1` prints page console messages and app-scheme requests. Add `QT_FORCE_STDERR_LOGGING=1` when stderr isn't a terminal. `OMAMAP_CORE_DIR` and `OMAMAP_THEME_DIR` override where the web core and the Omarchy theme are read from.
+`OMAMAP_DEBUG=1` prints page console messages and app-scheme requests. Add `QT_FORCE_STDERR_LOGGING=1` when stderr isn't a terminal. `OMAMAP_CORE_DIR` and `OMAMAP_THEME_DIR` override where the web core and the Omarchy theme are read from. `OMAMAP_INSTANCE=name` uses a separate single-instance channel, so a test run never sends files to your open window.
 
 ### Origins
 

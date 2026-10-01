@@ -1,8 +1,9 @@
 "use strict";
 /* ---------------------------------------------------------------------------
    OmaMap: view spatial datasets over a background map and inspect features.
-   Parsing lives in parse.js (normally in a worker); this file owns the map,
-   dataset list, selection and attribute inspector.
+   Parsing lives in parse.js (normally in a worker), styling in style.js and
+   the attribute table in table.js; this file owns the map, dataset list,
+   selection and attribute inspector.
 --------------------------------------------------------------------------- */
 
 const MAX_DATASETS = 50;
@@ -17,7 +18,9 @@ const STATE = {
   basemapId: null,        // effective basemap
   mode: "dark",
   palette: [],
-  datasets: [],           // { id, name, slot, layer, featureCount, geomTypes, visible, warnings }
+  themeColors: {},
+  datasets: [],           // { id, name, slot, layer, features, layers, style, featureCount, geomTypes, visible, warnings }
+  styleOpenId: null,      // dataset whose style editor is open
   nextId: 1,
   nextSlot: 0,
   hits: [],               // [{ ds, layer }] under the last click, topmost first
@@ -86,6 +89,7 @@ function applyTheme(theme) {
     rootStyle.setProperty("--font", '"' + theme.font.replace(/["']/g, "") + '", ui-monospace, monospace');
   }
   STATE.mode = theme.mode === "light" ? "light" : "dark";
+  STATE.themeColors = colors;
   document.documentElement.setAttribute("data-mode", STATE.mode);
   // Dataset colours: the theme's hues, minus the accent (reserved for selection).
   const accent = String(colors.accent || cssVar("--accent")).toLowerCase();
@@ -98,10 +102,13 @@ function applyTheme(theme) {
   STATE.datasets.forEach(applyDatasetStyle);
   highlightSelection();
   renderLayerList();
+  renderLegend();
   if (STATE.map) setBasemap(STATE.basemapPref, false);
 }
 
-function datasetColour(ds) { return STATE.palette[ds.slot % STATE.palette.length]; }
+function datasetColour(ds) {
+  return (ds.style && ds.style.colour) || STATE.palette[ds.slot % STATE.palette.length];
+}
 
 /* ------------------------------ Basemaps --------------------------------- */
 function effectiveBasemap(pref) {
@@ -166,33 +173,36 @@ function eachLeaf(layer, fn) {
   else fn(layer);
 }
 
-function leafStyle(leaf, colour, selected) {
+function leafStyle(leaf, colour, style, selected) {
   const accent = cssVar("--accent");
-  const halo = cssVar("--bg-deep");
+  const outline = style.outline === "fg" ? cssVar("--fg") : style.outline === "bg" ? cssVar("--bg-deep") : null;
   if (leaf instanceof L.CircleMarker) {
-    return selected
-      ? { radius: 9, color: accent, weight: 3, fillColor: colour, fillOpacity: 1, opacity: 1 }
-      : { radius: 5.5, color: halo, weight: 1.5, fillColor: colour, fillOpacity: 0.9, opacity: 0.9 };
+    if (selected) return { radius: style.radius + 3.5, color: accent, weight: 3, fillColor: colour, fillOpacity: 1, opacity: 1 };
+    return {
+      radius: style.radius, fillColor: colour, fillOpacity: style.fillOpacity,
+      color: outline || cssVar("--bg-deep"), weight: style.outline === "none" ? 0 : 1.5, opacity: 0.9
+    };
   }
   if (leaf instanceof L.Polygon) {
-    return selected
-      ? { color: accent, weight: 3.5, fillColor: colour, fillOpacity: 0.45, opacity: 1 }
-      : { color: colour, weight: 1.5, fillColor: colour, fillOpacity: 0.22, opacity: 0.95 };
+    if (selected) return { color: accent, weight: Math.max(3.5, style.weight + 1.5), fillColor: colour, fillOpacity: Math.min(1, style.fillOpacity + 0.2), opacity: 1 };
+    return {
+      color: outline || colour, weight: style.outline === "none" ? 0 : style.weight, opacity: 0.95,
+      fillColor: colour, fillOpacity: style.fillOpacity
+    };
   }
-  return selected
-    ? { color: accent, weight: 5, opacity: 1 }
-    : { color: colour, weight: 2.5, opacity: 0.95 };
+  if (selected) return { color: accent, weight: style.weight + 3, opacity: 1 };
+  return { color: colour, weight: style.weight, opacity: 0.95 };
 }
 
-function styleFeatureLayer(layer, colour, selected) {
+function styleFeatureLayer(layer, ds, selected) {
+  const colour = featureColour(ds, layer._omaIndex);
   eachLeaf(layer, function (leaf) {
-    if (leaf.setStyle) leaf.setStyle(leafStyle(leaf, colour, selected));
+    if (leaf.setStyle) leaf.setStyle(leafStyle(leaf, colour, ds.style, selected));
   });
 }
 
 function applyDatasetStyle(ds) {
-  const colour = datasetColour(ds);
-  ds.layer.eachLayer(function (layer) { styleFeatureLayer(layer, colour, false); });
+  ds.layers.forEach(function (layer) { styleFeatureLayer(layer, ds, false); });
 }
 
 /* ------------------------------ Datasets --------------------------------- */
@@ -212,22 +222,26 @@ function addDataset(parsed) {
   if (STATE.datasets.length >= MAX_DATASETS) throw new Error("Dataset limit reached (" + MAX_DATASETS + "). Remove one first.");
   const geojson = parsed.geojson;
   let index = 0;
+  const layers = [];
   const layer = L.geoJSON(geojson, {
     renderer: STATE.renderer,
     interactive: false,     // selection is done by our own hit-testing
     pointToLayer: function (feature, latlng) { return L.circleMarker(latlng, { renderer: STATE.renderer, interactive: false }); },
-    onEachFeature: function (feature, lyr) { lyr._omaIndex = index++; }
+    onEachFeature: function (feature, lyr) { lyr._omaIndex = index++; layers.push(lyr); }
   });
   const ds = {
     id: "ds-" + (STATE.nextId++),
     name: String(parsed.name || "Untitled").slice(0, 200),
     slot: STATE.nextSlot++,
     layer: layer,
+    features: geojson.features,
+    layers: layers,           // per feature, in file order
     featureCount: geojson.features.length,
     geomTypes: geometrySummary(geojson),
     visible: true,
     warnings: parsed.warnings || []
   };
+  ds.style = defaultStyle(ds);
   applyDatasetStyle(ds);
   layer.addTo(STATE.map);
   STATE.datasets.push(ds);
@@ -249,6 +263,7 @@ function toggleVisible(id) {
     if (STATE.hits.some(function (h) { return h.ds === ds; })) clearSelection();
   }
   renderLayerList();
+  renderLegend();
   setStatus((ds.visible ? "Showing " : "Hid ") + ds.name + ".");
 }
 
@@ -277,7 +292,10 @@ function removeDataset(id) {
   if (STATE.hits.some(function (h) { return h.ds === ds; })) clearSelection();
   STATE.map.removeLayer(ds.layer);
   STATE.datasets.splice(index, 1);
+  if (STATE.styleOpenId === ds.id) STATE.styleOpenId = null;
   renderLayerList();
+  renderLegend();
+  Table.onDatasetsChanged();
   setStatus("Removed " + ds.name + ".");
 }
 
@@ -286,12 +304,16 @@ function clearAll() {
   STATE.datasets.forEach(function (ds) { STATE.map.removeLayer(ds.layer); });
   STATE.datasets = [];
   STATE.nextSlot = 0;
+  STATE.styleOpenId = null;
   renderLayerList();
+  renderLegend();
+  Table.onDatasetsChanged();
   setStatus("Cleared all datasets.");
 }
 
 function swatchSvg(ds) {
-  const colour = datasetColour(ds);
+  const bf = ds.style.byField;
+  const colour = bf ? "url(#sw-" + ds.id + ")" : datasetColour(ds);
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
   svg.setAttribute("width", "14"); svg.setAttribute("height", "14"); svg.setAttribute("viewBox", "0 0 14 14");
@@ -308,6 +330,23 @@ function swatchSvg(ds) {
   } else {
     shape = document.createElementNS(ns, "circle");
     shape.setAttribute("cx", "7"); shape.setAttribute("cy", "7"); shape.setAttribute("r", "5"); shape.setAttribute("fill", colour);
+  }
+  if (bf) {
+    // Several class colours side by side, so a styled dataset reads as such.
+    const defs = document.createElementNS(ns, "defs");
+    const grad = document.createElementNS(ns, "linearGradient");
+    grad.setAttribute("id", "sw-" + ds.id);
+    const n = Math.min(4, bf.classes.length) || 1;
+    for (let i = 0; i < n; i++) {
+      const c = classColour(bf, Math.round(i * (bf.classes.length - 1) / Math.max(1, n - 1)));
+      [i / n, (i + 1) / n].forEach(function (off) {
+        const stop = document.createElementNS(ns, "stop");
+        stop.setAttribute("offset", String(off)); stop.setAttribute("stop-color", c);
+        grad.appendChild(stop);
+      });
+    }
+    defs.appendChild(grad);
+    svg.appendChild(defs);
   }
   svg.appendChild(shape);
   return svg;
@@ -329,6 +368,7 @@ function renderLayerList() {
   STATE.datasets.slice().reverse().forEach(function (ds) {
     const row = document.createElement("div");
     row.className = "layer" + (ds.visible ? "" : " hidden-layer") + (ds === selectedDs ? " has-selection" : "");
+    row.dataset.id = ds.id;
     const sw = document.createElement("span"); sw.className = "layer-swatch"; sw.appendChild(swatchSvg(ds));
     const text = document.createElement("div"); text.className = "layer-text"; text.title = "Zoom to " + ds.name;
     const name = document.createElement("div"); name.className = "layer-name"; name.textContent = ds.name;
@@ -337,6 +377,18 @@ function renderLayerList() {
     text.appendChild(name); text.appendChild(sub);
     text.addEventListener("click", function () { zoomToDataset(ds.id); });
     const actions = document.createElement("div"); actions.className = "layer-actions";
+    const styling = STATE.styleOpenId === ds.id;
+    const styleBtn = iconButton((styling ? "Close style for " : "Style ") + ds.name, "◐", function () {
+      STATE.styleOpenId = styling ? null : ds.id;
+      renderLayerList();
+    });
+    if (styling) styleBtn.classList.add("on");
+    actions.appendChild(styleBtn);
+    const tableBtn = iconButton("Attribute table for " + ds.name, "▦", function () {
+      if (Table.isOpen() && Table.ds === ds) Table.close(); else Table.open(ds);
+    });
+    if (Table.isOpen() && Table.ds === ds) tableBtn.classList.add("on");
+    actions.appendChild(tableBtn);
     actions.appendChild(iconButton(ds.visible ? "Hide " + ds.name : "Show " + ds.name, ds.visible ? "◉" : "○", function () { toggleVisible(ds.id); }));
     actions.appendChild(iconButton("Remove " + ds.name, "×", function () { removeDataset(ds.id); }, "danger"));
     row.appendChild(sw); row.appendChild(text); row.appendChild(actions);
@@ -344,6 +396,7 @@ function renderLayerList() {
       const warn = document.createElement("div"); warn.className = "layer-warn"; warn.textContent = "⚠ " + w;
       row.appendChild(warn);
     });
+    if (styling) row.appendChild(renderStyleEditor(ds));
     list.appendChild(row);
   });
   const n = STATE.datasets.length;
@@ -391,13 +444,13 @@ function currentHit() { return STATE.hits.length ? STATE.hits[STATE.hitIndex] : 
 
 function clearHighlight() {
   const hit = currentHit();
-  if (hit) styleFeatureLayer(hit.layer, datasetColour(hit.ds), false);
+  if (hit) styleFeatureLayer(hit.layer, hit.ds, false);
 }
 
 function highlightSelection() {
   const hit = currentHit();
   if (!hit) return;
-  styleFeatureLayer(hit.layer, datasetColour(hit.ds), true);
+  styleFeatureLayer(hit.layer, hit.ds, true);
   if (hit.layer.bringToFront) hit.layer.bringToFront();
 }
 
@@ -405,6 +458,7 @@ function showSelection() {
   highlightSelection();
   renderInspector();
   renderLayerList();
+  Table.onSelection();
   const hit = currentHit();
   setStatus("Selected " + featureLabel(hit.layer.feature, hit.layer._omaIndex) + " in " + hit.ds.name + ".");
 }
@@ -423,6 +477,7 @@ function clearSelection() {
   STATE.hitIndex = 0;
   el("inspector").hidden = true;
   renderLayerList();
+  Table.onSelection();
   setStatus("Selection cleared.");
 }
 
@@ -436,6 +491,25 @@ function zoomToSelection() {
     if (b.isValid()) { STATE.map.setView(b.getCenter(), Math.max(16, STATE.map.getZoom())); return; }
   }
   if (layer.getLatLng) STATE.map.setView(layer.getLatLng(), Math.max(16, STATE.map.getZoom()));
+}
+
+// Bring the selection into view without zooming out; zoom in to small features.
+function panToSelection() {
+  const hit = currentHit();
+  if (!hit) return;
+  const layer = hit.layer;
+  const view = STATE.map.getBounds();
+  if (layer.getLatLng) {
+    const ll = layer.getLatLng();
+    if (STATE.map.getZoom() < 13) STATE.map.setView(ll, 15);
+    else if (!view.pad(-0.1).contains(ll)) STATE.map.panTo(ll);
+    return;
+  }
+  const b = layer.getBounds();
+  if (!b.isValid()) return;
+  const viewSize = STATE.map.latLngToLayerPoint(view.getNorthEast()).distanceTo(STATE.map.latLngToLayerPoint(view.getSouthWest()));
+  const size = STATE.map.latLngToLayerPoint(b.getNorthEast()).distanceTo(STATE.map.latLngToLayerPoint(b.getSouthWest()));
+  if (!view.contains(b) || size < 12 || size > viewSize) fitBounds(b, 17);
 }
 
 /* ------------------------------ Measures --------------------------------- */
@@ -518,7 +592,7 @@ function renderInspector() {
   const feature = hit.layer.feature;
   const g = feature.geometry;
   el("inspector").hidden = false;
-  el("insp-swatch").style.background = datasetColour(hit.ds);
+  el("insp-swatch").style.background = featureColour(hit.ds, hit.layer._omaIndex);
   el("insp-ds").textContent = featureLabel(feature, hit.layer._omaIndex);
   const bits = [hit.ds.name, g.type, "#" + (hit.layer._omaIndex + 1) + " of " + hit.ds.featureCount.toLocaleString()];
   if (g.type === "Point") bits.push(g.coordinates[1].toFixed(6) + ", " + g.coordinates[0].toFixed(6));
@@ -741,6 +815,7 @@ async function handleFiles(fileList) {
   }
   setLoading(false);
   renderLayerList();
+  Table.onDatasetsChanged();
   if (added.length) {
     const bounds = L.latLngBounds([]);
     added.forEach(function (ds) { bounds.extend(ds.layer.getBounds()); });
@@ -771,7 +846,7 @@ function openUrls(list) {
   return handleFiles(files);
 }
 
-window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, version: "0.1.0" };
+window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, version: "0.2.0" };
 
 /* -------------------------------- Wiring --------------------------------- */
 function wireDragDrop() {
@@ -808,6 +883,8 @@ function wireKeys() {
     else if (k === "B") cycleBasemap(-1);
     else if (k === "f" || k === "F") fitAll();
     else if (k === "z" || k === "Z") zoomToSelection();
+    else if (k === "t" || k === "T") Table.toggle();
+    else if (k === "l" || k === "L") toggleLegend();
     else if (k === "]") stepHit(1);
     else if (k === "[") stepHit(-1);
     else if (k === "/" && !el("inspector").hidden) { e.preventDefault(); el("attr-filter").focus(); }
@@ -856,6 +933,7 @@ function boot() {
   Parser.start();
   wireDragDrop();
   wireKeys();
+  Table.wire();
   el("btn-open").addEventListener("click", function () { el("file-input").click(); });
   el("layer-empty").addEventListener("click", function () { el("file-input").click(); });
   el("file-input").addEventListener("change", function () { const files = Array.from(this.files || []); this.value = ""; handleFiles(files); });
@@ -864,6 +942,7 @@ function boot() {
   el("insp-close").addEventListener("click", clearSelection);
   el("insp-zoom").addEventListener("click", zoomToSelection);
   el("insp-copy").addEventListener("click", copyAttributes);
+  el("insp-table").addEventListener("click", function () { const hit = currentHit(); if (hit) { Table.open(hit.ds); Table.reveal(hit.layer._omaIndex); } });
   el("attr-filter").addEventListener("input", renderAttributes);
   renderLayerList();
   setStatus("Ready. Drop files anywhere or press O to open.");

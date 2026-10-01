@@ -38,10 +38,29 @@
       </div>
     </aside>
 
-    <div class="map-wrap">
-      <div id="map" aria-label="Map"></div>
-      <div class="drop-veil" id="drop-veil" aria-hidden="true"><div>Drop to add datasets</div></div>
-      <div class="loading" id="loading" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span><span id="loading-msg">Reading…</span></div>
+    <div class="center" id="center">
+      <div class="map-wrap">
+        <div id="map" aria-label="Map"></div>
+        <div class="legend" id="legend" aria-label="Legend" hidden></div>
+        <div class="drop-veil" id="drop-veil" aria-hidden="true"><div>Drop to add datasets</div></div>
+        <div class="loading" id="loading" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span><span id="loading-msg">Reading…</span></div>
+      </div>
+      <section class="table-panel" id="table-panel" aria-label="Attribute table" hidden>
+        <div class="tp-resize" id="tp-resize" title="Drag to resize"></div>
+        <div class="tp-head">
+          <select id="tp-dataset" aria-label="Dataset"></select>
+          <input type="search" id="tp-search" placeholder="Search rows" autocomplete="off" spellcheck="false" aria-label="Search rows">
+          <label class="tp-check"><input type="checkbox" id="tp-inview"> In view only</label>
+          <span class="tp-count" id="tp-count"></span>
+          <span class="spacer"></span>
+          <span class="tp-hint">click a row to select · double-click to zoom · ↑↓ to step</span>
+          <button type="button" class="icon-btn" id="tp-close" aria-label="Close table (T)" title="Close table (T)">×</button>
+        </div>
+        <div class="tp-scroll" id="tp-scroll" tabindex="0">
+          <div class="tp-header" id="tp-header"></div>
+          <div class="tp-body" id="tp-body"></div>
+        </div>
+      </section>
     </div>
 
     <aside class="inspector" id="inspector" aria-label="Feature attributes" hidden>
@@ -57,6 +76,7 @@
       <div class="insp-actions">
         <input type="search" id="attr-filter" placeholder="Filter attributes" autocomplete="off" spellcheck="false" aria-label="Filter attributes">
         <button type="button" class="btn" id="insp-zoom" title="Zoom to feature (Z)">Zoom</button>
+        <button type="button" class="btn" id="insp-table" title="Show in attribute table (T)">Table</button>
         <button type="button" class="btn" id="insp-copy" title="Copy attributes as tab-separated text">Copy</button>
       </div>
       <div class="insp-body">
@@ -69,7 +89,7 @@
     <span id="status-text">Ready.</span>
     <span class="spacer"></span>
     <span class="coords" id="coords"></span>
-    <span class="keys"><kbd>O</kbd> open <kbd>B</kbd> basemap <kbd>F</kbd> fit <kbd>Z</kbd> zoom <kbd>Esc</kbd> clear</span>
+    <span class="keys"><kbd>O</kbd> open <kbd>B</kbd> basemap <kbd>F</kbd> fit <kbd>Z</kbd> zoom <kbd>T</kbd> table <kbd>L</kbd> legend <kbd>Esc</kbd> clear</span>
   </footer>
 </div>
 <div class="toasts" id="toasts" aria-live="polite"></div>
@@ -78,6 +98,8 @@
 <script src="vendor/togeojson.umd.js"></script>
 <script src="parse.js"></script>
 <script src="basemaps.js"></script>
+<script src="style.js"></script>
+<script src="table.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

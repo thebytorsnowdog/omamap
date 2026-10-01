@@ -33,9 +33,14 @@ static QString coreDirectory()
     return {};
 }
 
+// One running window per user. OMAMAP_INSTANCE names a separate channel, so
+// tests (or a second profile) never hand files to the user's own window.
 static QString socketName()
 {
-    return QStringLiteral("omamap-%1").arg(qEnvironmentVariable("USER", QStringLiteral("user")));
+    QString name = QStringLiteral("omamap-%1").arg(qEnvironmentVariable("USER", QStringLiteral("user")));
+    const QString instance = qEnvironmentVariable("OMAMAP_INSTANCE");
+    if (!instance.isEmpty()) name += QLatin1Char('-') + instance;
+    return name;
 }
 
 // Returns true if a running OmaMap accepted the files.

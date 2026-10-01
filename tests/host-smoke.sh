@@ -11,6 +11,7 @@ fix=tests/output/fixtures
 
 export QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu
 export XDG_DATA_HOME=$(mktemp -d) XDG_CACHE_HOME=$(mktemp -d)   # throwaway profile
+export OMAMAP_INSTANCE=smoke-$$   # never talk to the user's running OmaMap
 trap 'rm -rf "$XDG_DATA_HOME" "$XDG_CACHE_HOME"' EXIT
 fail=0
 
