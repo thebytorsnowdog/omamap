@@ -1,6 +1,6 @@
 # OmaMap
 
-View spatial data on Omarchy. Drop in GeoJSON, KML, GPX, CSV or shapefiles, see them over street, topo or satellite maps, click any feature to read its attributes, and browse each dataset as a table.
+View spatial data on Omarchy. Drop in GeoJSON, KML, GPX, CSV or shapefiles, see them over street, topo or satellite maps, click any feature to read its attributes, browse each dataset as a table, and save the whole workspace as a profile.
 
 OmaMap follows your Omarchy theme. Its colours, font and light/dark basemap change when you switch theme.
 
@@ -13,9 +13,16 @@ omamap sites.geojson roads.zip walk.gpx  # open with data
 
 Running `omamap file` again sends the file to the open window. You can also drag files onto the window or press <kbd>O</kbd>.
 
+### Profiles
+
+**Save** (<kbd>Ctrl+S</kbd>) writes a `.omamap` profile: every open dataset with its data, style, visibility and stacking order, plus the map view and basemap. Open it like any other file, from the app, the file manager or `omamap work.omamap`, to pick up where you left off. If datasets are already open, OmaMap asks before replacing them.
+
+A profile contains a full copy of the data, so share it with the same care as the data itself. Profiles exported from WIMP (`.sdv-profile.json`) open too.
+
 | Key | Action |
 |---|---|
-| <kbd>O</kbd> | Open files |
+| <kbd>O</kbd> | Open files or a profile |
+| <kbd>Ctrl+S</kbd> | Save a profile |
 | <kbd>1</kbd>–<kbd>6</kbd>, <kbd>B</kbd> / <kbd>Shift+B</kbd> | Choose / cycle basemap |
 | <kbd>F</kbd> | Fit all datasets |
 | click | Select the feature under the cursor |
@@ -52,12 +59,16 @@ The table draws only the rows on screen, so it stays quick with large datasets.
 
 - **GeoJSON** (`.geojson`, `.json`) in WGS84 longitude/latitude.
 - **KML** and **GPX**.
-- **CSV** with latitude/longitude columns (`lat`/`lon`, `latitude`/`longitude`, `x`/`y`…). Cells stay as text. Easting/northing CSV is not supported yet.
+- **CSV** with latitude/longitude columns (`lat`/`lon`, `latitude`/`longitude`), or British National Grid easting/northing (`easting`/`northing`, or `x`/`y` holding grid values). Cells stay as text.
 - **Shapefiles**, either zipped or as loose `.shp` + `.dbf` (+ `.prj`, `.cpg`) files dropped together. A `.prj` file is used to reproject to WGS84. A ZIP with several layers opens as one dataset per layer.
+
+British National Grid data (EPSG:27700) is converted to WGS84 automatically, to within about 5 m (the same 7-parameter method PROJ uses without grid files). That covers easting/northing CSV, GeoJSON that declares EPSG:27700 (as older QGIS exports do), and shapefiles with a BNG `.prj`. The dataset list notes when a conversion happened.
 
 Imports are validated before anything reaches the map. Malformed geometry, unsafe property names, ZIP bombs and inconsistent archives are rejected with a reason. Parsing runs in a background worker so large files don't freeze the window.
 
 Limits: 100 MiB per file, 50 MiB per ZIP (250 MiB expanded), 500,000 features and 5 million coordinates per dataset, 50 datasets.
+
+Point datasets are drawn on the GPU (WebGL), so hundreds of thousands of points pan and zoom smoothly. Where WebGL isn't available, a 2D fallback is used. Lines and polygons use Leaflet's canvas renderer, which handles tens of thousands of shapes comfortably.
 
 ## What leaves your machine
 
@@ -99,6 +110,16 @@ To update, run `git pull` in the clone and `makepkg -si` again. To uninstall, ru
 
 Requires `qt6-base` and `qt6-webengine`. Building also needs `cmake`.
 
+### Omarchy bar widget
+
+The repository is also an Omarchy shell plugin. It adds a map icon to the bar: left-click opens OmaMap, and right-click lists your recent profiles and files.
+
+```sh
+omarchy plugin add https://github.com/thebytorsnowdog/omamap.git --enable
+```
+
+The widget only launches the app, so install OmaMap first. Recent files are read from `~/.local/state/omamap/recent.json`; set `maxItems` in the widget's settings to change how many are listed.
+
 ### Optional: a key binding and window rule
 
 Add to `~/.config/hypr/bindings.lua` (`SUPER + SHIFT + M` is already Music in Omarchy, so pick a free chord):
@@ -114,7 +135,9 @@ OmaMap's window class is `omamap`.
 ```text
 core/      web app: index.html, app.js (map, datasets, inspector),
            parse.js (validation and parsing), parse-worker.js, vendor/
-host/      Qt 6 WebEngine shell: omamap:// scheme, theme watcher, single instance
+host/      Qt 6 WebEngine shell: omamap:// scheme, theme watcher, single instance,
+           profile save dialog, recent files
+omarchy-plugin/  bar widget (manifest.json at the repository root)
 packaging/ desktop entry, MIME types, icon, PKGBUILD
 tests/     parser tests (Node), browser tests (Playwright), host smoke test
 ```

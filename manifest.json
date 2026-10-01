@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "thebytorsnowdog.omamap",
+  "name": "OmaMap",
+  "version": "0.3.0",
+  "author": "thebytorsnowdog",
+  "license": "MIT",
+  "description": "Open OmaMap and your recent spatial files and profiles from the bar. Needs the OmaMap app installed.",
+  "homepage": "https://github.com/thebytorsnowdog/omamap",
+  "repository": "https://github.com/thebytorsnowdog/omamap",
+  "keywords": ["map", "gis", "geojson", "shapefile", "spatial"],
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "omarchy-plugin/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaMap",
+    "description": "Open OmaMap; right-click for recent files",
+    "category": "Files",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": { "maxItems": 8 },
+    "schema": [
+      { "key": "maxItems", "type": "number", "label": "Recent files shown" }
+    ]
+  }
+}
