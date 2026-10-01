@@ -47,18 +47,31 @@ Your data files never leave your machine. Only basemap tiles are fetched over th
 | Satellite | Esri World Imagery |
 | None | Nothing is requested |
 
-Tile requests reveal the area you are viewing to that provider. None of the basemaps needs an API key. They're meant for light, personal use; heavy or commercial use needs your own provider. The window can't contact any other host. A Content Security Policy in the page and a request filter in the host both enforce this.
+Tile requests reveal the area you are viewing to that provider. The window can't contact any other host. A Content Security Policy in the page and a request filter in the host both enforce this.
 
-Tiles are cached on disk (`~/.cache/omamap`, up to 512 MiB), so places you've already viewed load offline. The last map view and basemap choice are remembered in `~/.local/share/omamap`.
+Viewed tiles are kept in an ordinary HTTP cache (`~/.cache/omamap`, up to 512 MiB) that follows each provider's caching headers. OmaMap never downloads areas in bulk or ahead of time. The last map view and basemap choice are remembered in `~/.local/share/omamap`.
+
+### Map data terms
+
+None of the basemaps needs an API key. That convenience comes with conditions set by each provider, which apply to you as the user:
+
+- **OpenStreetMap** (Streets) is a volunteer-run service. Follow its [tile usage policy](https://operations.osmfoundation.org/policies/tiles/): normal interactive viewing only, with no bulk or offline downloading.
+- **Esri** (Light, Dark, Satellite) is free for **non-commercial use** with attribution, under [Esri's terms](https://www.esri.com/en-us/legal/terms/web-site-service). For work or commercial use, use the Streets or Topo maps or a provider you have a licence for.
+- **OpenTopoMap** (Topo) is CC-BY-SA and meant for light use.
+
+Attribution for the active basemap is always shown on the map.
 
 ## Install
 
 ### Arch / Omarchy
 
 ```sh
-cd packaging/arch
+git clone https://github.com/thebytorsnowdog/omamap.git
+cd omamap/packaging/arch
 makepkg -si
 ```
+
+To update, run `git pull` in the clone and `makepkg -si` again. To uninstall, run `sudo pacman -R omamap`.
 
 Requires `qt6-base` and `qt6-webengine`. Building also needs `cmake`.
 

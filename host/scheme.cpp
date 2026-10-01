@@ -106,5 +106,5 @@ void RequestFilter::interceptRequest(QWebEngineUrlRequestInfo &info)
         return;
     }
     if (host == QLatin1String("tile.openstreetmap.org") || host.endsWith(QLatin1String(".tile.opentopomap.org")))
-        info.setHttpHeader("User-Agent", "OmaMap/" OMAMAP_VERSION " (Omarchy spatial data viewer)");
+        info.setHttpHeader("User-Agent", "OmaMap/" OMAMAP_VERSION " (+https://github.com/thebytorsnowdog/omamap)");
 }
