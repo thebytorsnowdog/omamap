@@ -18,6 +18,8 @@ const Table = {
   columns: [],        // [{ field, width }]
   selected: -1,       // feature index
   frame: 0,
+  revision: 0,
+  pending: Promise.resolve(),
 
   isOpen: function () { return !el("table-panel").hidden; },
 
@@ -30,9 +32,27 @@ const Table = {
   },
 
   close: function () {
+    this.revision++;
+    cancelAnimationFrame(this.frame);
     el("table-panel").hidden = true;
     this.ds = null;
+    this.order = null;
+    this.columns = [];
+    el("tp-body").textContent = "";
+    el("tp-header").textContent = "";
     renderLayerList();
+  },
+
+  forget: function (ds) {
+    if (this.last === ds) this.last = null;
+    if (this.ds === ds) {
+      this.revision++;
+      cancelAnimationFrame(this.frame);
+      this.ds = null; this.order = null; this.columns = [];
+      el("tp-body").textContent = "";
+      el("tp-header").textContent = "";
+    }
+    ds.rowText = null; ds.rowTextBytes = 0;
   },
 
   toggle: function () {
@@ -44,6 +64,7 @@ const Table = {
 
   show: function (ds) {
     this.ds = ds;
+    this.order = null;
     this.last = ds;
     this.sort = null;
     this.selected = -1;
@@ -122,7 +143,9 @@ const Table = {
     if (t === undefined) {
       const p = ds.features[i].properties;
       t = Object.keys(p).map(function (k) { const v = p[k]; return v === null || v === undefined ? "" : (typeof v === "object" ? JSON.stringify(v) : String(v)); }).join("\u0001").toLowerCase();
-      ds.rowText[i] = t;
+      // Bound the extra text cache independently of dataset size.
+      const bytes = (ds.rowTextBytes || 0) + t.length * 2;
+      if (bytes <= 16 * 1024 * 1024) { ds.rowText[i] = t; ds.rowTextBytes = bytes; }
     }
     return t;
   },
@@ -137,12 +160,23 @@ const Table = {
   },
 
   refilter: function () {
+    this.pending = this.computeOrder();
+    return this.pending;
+  },
+
+  computeOrder: async function () {
+    const revision = ++this.revision;
     const ds = this.ds;
     if (!ds) return;
     const q = this.query.trim().toLowerCase();
     const visible = this.inView ? this.inViewTest() : null;
     let order = [];
+    let started = performance.now();
+    const pause = async () => { await new Promise(r => setTimeout(r, 0)); started = performance.now(); };
     for (let i = 0; i < ds.features.length; i++) {
+      if (i % 256 === 0 && performance.now() - started > 8) {
+        await pause(); if (this.revision !== revision || this.ds !== ds) return;
+      }
       if (q && this.rowText(i).indexOf(q) < 0) continue;
       if (visible && !visible(ds.layers[i])) continue;
       order.push(i);
@@ -150,18 +184,47 @@ const Table = {
     if (this.sort) {
       const field = this.sort.field, dir = this.sort.dir;
       const feats = ds.features;
-      const keyed = order.map(function (i) {
-        const v = propOf(feats[i].properties, field);
-        return { i: i, n: numericValue(v), s: isMissing(v) ? null : (typeof v === "object" ? JSON.stringify(v) : String(v)) };
-      });
+      let keyed = new Array(order.length);
+      for (let k = 0; k < order.length; k++) {
+        const i = order[k], v = propOf(feats[i].properties, field);
+        keyed[k] = { i: i, n: numericValue(v), s: isMissing(v) ? null : (typeof v === "object" ? JSON.stringify(v) : String(v)) };
+        if (k % 256 === 0 && performance.now() - started > 8) {
+          await pause(); if (this.revision !== revision || this.ds !== ds) return;
+        }
+      }
       const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-      keyed.sort(function (a, b) {
+      const compare = function (a, b) {
         if (a.s === null || b.s === null) return a.s === b.s ? a.i - b.i : (a.s === null ? 1 : -1);   // missing last
         if (a.n !== null && b.n !== null) return (a.n - b.n) * dir || a.i - b.i;
         return collator.compare(a.s, b.s) * dir || a.i - b.i;
-      });
+      };
+      // Native sort on small runs is faster than a full JavaScript merge
+      // sort, while bounded runs and cooperative merging keep it responsive.
+      const runSize = 2048;
+      for (let lo = 0; lo < keyed.length; lo += runSize) {
+        const run = keyed.slice(lo, lo + runSize).sort(compare);
+        for (let i = 0; i < run.length; i++) keyed[lo+i] = run[i];
+        if (performance.now() - started > 8) {
+          await pause(); if (this.revision !== revision || this.ds !== ds) return;
+        }
+      }
+      let scratch = new Array(keyed.length);
+      for (let width = runSize; width < keyed.length; width *= 2) {
+        for (let lo = 0; lo < keyed.length; lo += width * 2) {
+          const mid = Math.min(lo + width, keyed.length), hi = Math.min(lo + width * 2, keyed.length);
+          let a = lo, b = mid;
+          for (let k = lo; k < hi; k++) {
+            scratch[k] = b >= hi || (a < mid && compare(keyed[a], keyed[b]) <= 0) ? keyed[a++] : keyed[b++];
+            if (k % 1024 === 0 && performance.now() - started > 8) {
+              await pause(); if (this.revision !== revision || this.ds !== ds) return;
+            }
+          }
+        }
+        const previous = keyed; keyed = scratch; scratch = previous;
+      }
       order = keyed.map(function (k) { return k.i; });
     }
+    if (this.revision !== revision || this.ds !== ds) return;
     this.order = order;
     const count = el("tp-count");
     count.textContent = order.length === ds.features.length
