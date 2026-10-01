@@ -20,6 +20,7 @@
     geometryDepth: 8,
     propertiesPerFeature: 500,
     fieldsPerDataset: 1000,             // distinct attribute names
+    cells: 10000000,                    // attribute values built from one CSV or DBF
     propertyString: 100000,
     propertyBytes: 200 * 1024 * 1024,
     layersPerFile: 50,                  // datasets from one ZIP or profile
@@ -373,6 +374,7 @@
     const fields = parsed.data[0];
     if (!Array.isArray(fields) || !fields.length) throw new Error("CSV headers are invalid.");
     if (fields.length > LIMITS.propertiesPerFeature) throw new Error("CSV has more than " + LIMITS.propertiesPerFeature + " columns.");
+    if ((parsed.data.length - 1) * fields.length > LIMITS.cells) throw new Error("CSV has more than " + LIMITS.cells.toLocaleString() + " cells (rows × columns).");
     const headerKeys = new Set();
     fields.forEach(function (field, index) {
       const key = String(field).replace(/^﻿/, "").trim();
@@ -608,8 +610,38 @@
     return name.replace(/\.[^.]+$/, "");
   }
 
+  /* Check .shp and .dbf headers before shpjs reads them. shpjs trusts the
+     DBF record count, so a 73-byte .dbf claiming three billion records made
+     it allocate until the page ran out of memory; and a .shp of empty
+     records became millions of features before any limit applied. */
+  function checkShapefile(shpBytes, dbfBytes) {
+    const shp = new DataView(shpBytes.buffer, shpBytes.byteOffset, shpBytes.byteLength);
+    if (shpBytes.byteLength < 100 || shp.getInt32(0) !== 9994) throw new Error("The .shp file is not a shapefile.");
+    let records = 0;
+    for (let offset = 100; offset + 8 <= shpBytes.byteLength;) {
+      const length = shp.getInt32(offset + 4) * 2;   // big-endian, in 16-bit words
+      if (length < 0 || offset + 8 + length > shpBytes.byteLength) break;   // where shpjs stops too
+      if (++records > LIMITS.features) throw new Error("Shapefile has more than " + LIMITS.features.toLocaleString() + " records.");
+      offset += 8 + length;
+    }
+    if (!dbfBytes) return;
+    const dbf = new DataView(dbfBytes.buffer, dbfBytes.byteOffset, dbfBytes.byteLength);
+    if (dbfBytes.byteLength < 33) throw new Error("The .dbf file is truncated.");
+    const rows = dbf.getUint32(4, true), headerLength = dbf.getUint16(8, true), rowLength = dbf.getUint16(10, true);
+    let fields = 0;
+    for (let offset = 32; offset < headerLength - 1 && offset + 32 < dbfBytes.byteLength; offset += 32) {
+      fields++;
+      if (dbf.getUint8(offset + 32) === 13) break;
+    }
+    if (rows > LIMITS.features) throw new Error("The .dbf file has more than " + LIMITS.features.toLocaleString() + " records.");
+    if (fields > LIMITS.propertiesPerFeature) throw new Error("The .dbf file has more than " + LIMITS.propertiesPerFeature + " fields.");
+    if (rows * fields > LIMITS.cells) throw new Error("The .dbf file has more than " + LIMITS.cells.toLocaleString() + " values.");
+    if (!rowLength || headerLength + rows * rowLength > dbfBytes.byteLength) throw new Error("The .dbf file is truncated or its header is inconsistent.");
+  }
+
   async function shapefileParts(parts) {
     if (!parts.shp) throw new Error("Shapefile is missing its .shp file.");
+    checkShapefile(parts.shp, parts.dbf);
     const input = { shp: parts.shp };
     if (parts.dbf) input.dbf = parts.dbf;
     if (parts.prj) input.prj = decodeText(parts.prj);

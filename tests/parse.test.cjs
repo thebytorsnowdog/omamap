@@ -356,3 +356,52 @@ test("the layers of one ZIP together are capped at 1,000,000 features", async ()
   };
   await assert.rejects(P.parseBytes("big.zip", makeZip({ "a.csv": csv(), "b.csv": csv(), "c.csv": csv() })), /together exceed 1,000,000 features/);
 });
+
+/* Minimal shapefile writers for the header checks below. */
+function makeShp(points, emptyRecords = 0) {
+  const recs = [];
+  points.forEach(([x, y], i) => {
+    const r = Buffer.alloc(28);
+    r.writeInt32BE(i + 1, 0); r.writeInt32BE(10, 4);           // content: 20 bytes = 10 words
+    r.writeInt32LE(1, 8); r.writeDoubleLE(x, 12); r.writeDoubleLE(y, 20);
+    recs.push(r);
+  });
+  if (emptyRecords) recs.push(Buffer.alloc(8 * emptyRecords));  // id 0, length 0
+  const body = Buffer.concat(recs);
+  const head = Buffer.alloc(100);
+  head.writeInt32BE(9994, 0); head.writeInt32BE((100 + body.length) / 2, 24); head.writeInt32LE(1000, 28); head.writeInt32LE(1, 32);
+  return Buffer.concat([head, body]);
+}
+function makeDbf(values, claimedRecords) {
+  const head = Buffer.alloc(32);
+  head.writeUInt8(3, 0); head.writeUInt32LE(claimedRecords === undefined ? values.length : claimedRecords, 4);
+  head.writeUInt16LE(32 + 32 + 1, 8); head.writeUInt16LE(1 + 10, 10);
+  const field = Buffer.alloc(32);
+  field.write("name", 0, "latin1"); field.write("C", 11, "latin1"); field.writeUInt8(10, 16);
+  const rows = values.map((v) => Buffer.from(" " + String(v).padEnd(10).slice(0, 10), "latin1"));
+  return Buffer.concat([head, field, Buffer.from([13]), ...rows, Buffer.from([26])]);
+}
+const ab = (b) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+
+test("a .dbf claiming billions of records is refused before shpjs reads it", async () => {
+  // shpjs loops over the claimed count; 3.4 billion empty rows exhausted memory.
+  const shp = makeShp([[-3.2, 55.9]]);
+  assert.equal((await P.parseShapefileSet("ok", { shp: ab(shp), dbf: ab(makeDbf(["Leith"])) }))[0].geojson.features[0].properties.name, "Leith");
+  await assert.rejects(P.parseShapefileSet("bad", { shp: ab(shp), dbf: ab(makeDbf(["Leith"], 0xcc000001)) }), /more than 500,000 records/);
+  await assert.rejects(P.parseShapefileSet("short", { shp: ab(shp), dbf: ab(makeDbf(["Leith"], 1000)) }), /truncated or its header is inconsistent/);
+  // The same file inside a ZIP.
+  await assert.rejects(P.parseBytes("bad.zip", makeZip({ "x.shp": shp, "x.dbf": makeDbf(["Leith"], 0xcc000001) })), /more than 500,000 records/);
+});
+
+test("a .shp of millions of empty records is refused before features are built", async () => {
+  const shp = makeShp([[-3.2, 55.9]], P.LIMITS.features + 10);
+  await assert.rejects(P.parseShapefileSet("empty", { shp: ab(shp) }), /Shapefile has more than 500,000 records/);
+  await assert.rejects(P.parseShapefileSet("junk", { shp: ab(Buffer.alloc(200)) }), /not a shapefile/);
+});
+
+test("a CSV with more than 10 million cells is refused before features are built", () => {
+  // 100 MiB of one-character cells needed about 3 GiB once built.
+  const header = ["lat", "lon"].concat(Array.from({ length: 498 }, (_, i) => "c" + i)).join(",");
+  const row = "1" + ",1".repeat(499);
+  assert.throws(() => P.csvToGeoJSON(header + "\n" + (row + "\n").repeat(20001)), /more than 10,000,000 cells/);
+});
