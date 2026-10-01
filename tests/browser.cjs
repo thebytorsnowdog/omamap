@@ -196,7 +196,7 @@ function writeFixtures(dir) {
   });
 
   await check("only known tile providers were contacted", async () => {
-    const allowed = /^(tile\.openstreetmap\.org|[a-d]\.basemaps\.cartocdn\.com|server\.arcgisonline\.com|[a-c]\.tile\.opentopomap\.org)$/;
+    const allowed = /^(tile\.openstreetmap\.org|server\.arcgisonline\.com|[a-c]\.tile\.opentopomap\.org)$/;
     for (const host of external) assert.match(host, allowed);
   });
 

@@ -2,5 +2,5 @@ node_modules/
 build/
 tests/output/
 *.pkg.tar.*
-packaging/aur/src/
-packaging/aur/pkg/
+packaging/arch/src/
+packaging/arch/pkg/

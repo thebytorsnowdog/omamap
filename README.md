@@ -1,0 +1,104 @@
+# OmaMap
+
+View spatial data on Omarchy. Drop in GeoJSON, KML, GPX, CSV or shapefiles, see them over street, topo or satellite maps, and click any feature to read its attributes.
+
+OmaMap follows your Omarchy theme. Its colours, font and light/dark basemap change when you switch theme.
+
+## Use
+
+```sh
+omamap                                   # open the viewer
+omamap sites.geojson roads.zip walk.gpx  # open with data
+```
+
+Running `omamap file` again sends the file to the open window. You can also drag files onto the window or press <kbd>O</kbd>.
+
+| Key | Action |
+|---|---|
+| <kbd>O</kbd> | Open files |
+| <kbd>1</kbd>–<kbd>6</kbd>, <kbd>B</kbd> / <kbd>Shift+B</kbd> | Choose / cycle basemap |
+| <kbd>F</kbd> | Fit all datasets |
+| click | Select the feature under the cursor |
+| <kbd>[</kbd> <kbd>]</kbd> | Step through stacked features at the clicked spot |
+| <kbd>Z</kbd> | Zoom to the selected feature |
+| <kbd>/</kbd> | Filter the selected feature's attributes |
+| <kbd>Esc</kbd> | Leave the filter box, then clear the selection |
+
+### Formats
+
+- **GeoJSON** (`.geojson`, `.json`) in WGS84 longitude/latitude.
+- **KML** and **GPX**.
+- **CSV** with latitude/longitude columns (`lat`/`lon`, `latitude`/`longitude`, `x`/`y`…). Cells stay as text. Easting/northing CSV is not supported yet.
+- **Shapefiles**, either zipped or as loose `.shp` + `.dbf` (+ `.prj`, `.cpg`) files dropped together. A `.prj` file is used to reproject to WGS84. A ZIP with several layers opens as one dataset per layer.
+
+Imports are validated before anything reaches the map. Malformed geometry, unsafe property names, ZIP bombs and inconsistent archives are rejected with a reason. Parsing runs in a background worker so large files don't freeze the window.
+
+Limits: 100 MiB per file, 50 MiB per ZIP (250 MiB expanded), 500,000 features and 5 million coordinates per dataset, 50 datasets.
+
+## What leaves your machine
+
+Your data files never leave your machine. Only basemap tiles are fetched over the network:
+
+| Basemap | Provider |
+|---|---|
+| Streets | OpenStreetMap ([tile policy](https://operations.osmfoundation.org/policies/tiles/)) |
+| Light, Dark | Esri World Light/Dark Gray Canvas |
+| Topo | OpenTopoMap |
+| Satellite | Esri World Imagery |
+| None | Nothing is requested |
+
+Tile requests reveal the area you are viewing to that provider. None of the basemaps needs an API key. They're meant for light, personal use; heavy or commercial use needs your own provider. The window can't contact any other host. A Content Security Policy in the page and a request filter in the host both enforce this.
+
+Tiles are cached on disk (`~/.cache/omamap`, up to 512 MiB), so places you've already viewed load offline. The last map view and basemap choice are remembered in `~/.local/share/omamap`.
+
+## Install
+
+### Arch / Omarchy
+
+```sh
+cd packaging/arch
+makepkg -si
+```
+
+Requires `qt6-base` and `qt6-webengine`. Building also needs `cmake`.
+
+### Optional: a key binding and window rule
+
+Add to `~/.config/hypr/bindings.lua` (`SUPER + SHIFT + M` is already Music in Omarchy, so pick a free chord):
+
+```lua
+o.bind("SUPER + ALT + M", "OmaMap", "omamap")
+```
+
+OmaMap's window class is `omamap`.
+
+## Develop
+
+```text
+core/      web app: index.html, app.js (map, datasets, inspector),
+           parse.js (validation and parsing), parse-worker.js, vendor/
+host/      Qt 6 WebEngine shell: omamap:// scheme, theme watcher, single instance
+packaging/ desktop entry, MIME types, icon, PKGBUILD
+tests/     parser tests (Node), browser tests (Playwright), host smoke test
+```
+
+```sh
+cmake -S host -B build && cmake --build build
+./build/omamap --new-window some.geojson     # runs against core/ in this checkout
+
+npm install                 # playwright-core, for the browser tests
+npm test                    # parser and validation tests
+npm run test:browser        # drives core/ in Chromium (CHROMIUM=/usr/bin/chromium)
+tests/host-smoke.sh         # headless checks of the native host (run test:browser first)
+npm run serve               # core/ at http://127.0.0.1:8765 for quick UI work
+```
+
+`OMAMAP_DEBUG=1` prints page console messages and app-scheme requests. Add `QT_FORCE_STDERR_LOGGING=1` when stderr isn't a terminal. `OMAMAP_CORE_DIR` and `OMAMAP_THEME_DIR` override where the web core and the Omarchy theme are read from.
+
+### Origins
+
+The parsing and validation code comes from WIMP, a browser GIS viewer whose import paths went through a security review. That's why its ZIP, XML, CSV and GeoJSON checks are stricter than usual.
+
+## Licence
+
+MIT. Bundled libraries: Leaflet (BSD-2-Clause), shpjs and its bundled proj4 (MIT), fflate (MIT), PapaParse (MIT), @tmcw/togeojson (BSD-2-Clause). Their licence texts are in `core/vendor/licences/`.

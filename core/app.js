@@ -118,14 +118,17 @@ function setBasemap(pref, remember) {
     STATE.baseLayer = null;
     const def = OMAMAP_BASEMAPS.find(function (b) { return b.id === id; });
     if (def && def.url) {
-      STATE.baseLayer = L.tileLayer(def.url, {
+      const options = {
         subdomains: def.subdomains || "abc",
         maxNativeZoom: def.maxNativeZoom || 19,
         maxZoom: 22,
-        attribution: def.attribution,
         crossOrigin: true
-      }).addTo(STATE.map);
-      STATE.baseLayer.bringToBack();
+      };
+      const base = L.tileLayer(def.url, Object.assign({ attribution: def.attribution }, options));
+      const layers = [base];
+      // Labels sit above the data so place names stay readable.
+      if (def.labels) layers.push(L.tileLayer(def.labels, Object.assign({ pane: "labels" }, options)));
+      STATE.baseLayer = L.layerGroup(layers).addTo(STATE.map);
     }
     STATE.basemapId = id;
   }
@@ -819,6 +822,9 @@ function initMap() {
     worldCopyJump: true, minZoom: 2, maxZoom: 22, zoomSnap: 0.5, boxZoom: true
   });
   STATE.map.attributionControl.setPrefix(false);
+  STATE.map.createPane("labels");
+  STATE.map.getPane("labels").style.zIndex = 450;          // above overlays (400), below markers' tooltips
+  STATE.map.getPane("labels").style.pointerEvents = "none";
   L.control.scale({ position: "bottomleft", maxWidth: 140 }).addTo(STATE.map);
   let view = null;
   try { view = JSON.parse(storageGet(STORAGE_KEYS.view) || "null"); } catch (e) { view = null; }

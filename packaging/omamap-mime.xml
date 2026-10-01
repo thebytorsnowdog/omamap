@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <!-- GeoJSON is not in every shared-mime-info release; declare it so file
+       managers offer OmaMap for .geojson files. -->
+  <mime-type type="application/geo+json">
+    <comment>GeoJSON spatial data</comment>
+    <sub-class-of type="application/json"/>
+    <glob pattern="*.geojson"/>
+  </mime-type>
+  <mime-type type="application/x-shapefile">
+    <comment>ESRI Shapefile</comment>
+    <glob pattern="*.shp"/>
+  </mime-type>
+</mime-info>

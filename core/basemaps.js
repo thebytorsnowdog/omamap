@@ -1,7 +1,8 @@
 "use strict";
 /* Background maps. Selecting one sends tile requests for the visible area to
-   that provider. Every origin here must also appear in index.html's CSP
-   img-src. */
+   that provider. All of these work without an API key. Every origin here must
+   also appear in index.html's CSP img-src and host/scheme.cpp's RequestFilter.
+   `labels` is an optional transparent overlay drawn above the data. */
 const OMAMAP_BASEMAPS = [
   {
     id: "streets", label: "Streets",
@@ -11,15 +12,17 @@ const OMAMAP_BASEMAPS = [
   },
   {
     id: "light", label: "Light",
-    url: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-    subdomains: "abcd", maxNativeZoom: 20,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+    labels: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+    maxNativeZoom: 16,
+    attribution: 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors, and the GIS user community'
   },
   {
     id: "dark", label: "Dark",
-    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-    subdomains: "abcd", maxNativeZoom: 20,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+    labels: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+    maxNativeZoom: 16,
+    attribution: 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors, and the GIS user community'
   },
   {
     id: "topo", label: "Topo",

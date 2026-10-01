@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=OmaMap
+GenericName=Spatial data viewer
+Comment=View GeoJSON, KML, GPX, CSV and shapefiles over street and satellite maps
+Exec=omamap %F
+TryExec=omamap
+Icon=omamap
+Terminal=false
+StartupWMClass=omamap
+Categories=Science;Geography;
+Keywords=map;gis;geojson;kml;gpx;shapefile;spatial;satellite;
+MimeType=application/geo+json;application/vnd.google-earth.kml+xml;application/gpx+xml;application/x-shapefile;
