@@ -66,7 +66,7 @@ const Table = {
     return fields.map(function (field) {
       let longest = field.length + 1;
       for (let i = 0; i < n; i++) {
-        const v = ds.features[i].properties[field];
+        const v = propOf(ds.features[i].properties, field);
         const len = v === null || v === undefined ? 4 : (typeof v === "object" ? JSON.stringify(v).length : String(v).length);
         if (len > longest) longest = len;
       }
@@ -151,7 +151,7 @@ const Table = {
       const field = this.sort.field, dir = this.sort.dir;
       const feats = ds.features;
       const keyed = order.map(function (i) {
-        const v = feats[i].properties[field];
+        const v = propOf(feats[i].properties, field);
         return { i: i, n: numericValue(v), s: isMissing(v) ? null : (typeof v === "object" ? JSON.stringify(v) : String(v)) };
       });
       const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
@@ -198,7 +198,7 @@ const Table = {
       const num = document.createElement("span"); num.className = "tp-cell tp-num"; num.textContent = String(i + 1);
       row.appendChild(num);
       this.columns.forEach(function (c) {
-        const v = p[c.field];
+        const v = propOf(p, c.field);
         const cell = document.createElement("span");
         cell.className = "tp-cell";
         if (v === null || v === undefined) { cell.classList.add("nullish"); cell.textContent = v === null ? "null" : ""; }

@@ -54,6 +54,13 @@ function numericValue(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/* A feature's own value for a field. Plain property access would also find
+   Object.prototype members ("toString", "valueOf"…) on features that lack a
+   field with that name, and show them as values. */
+function propOf(properties, field) {
+  return properties && Object.prototype.hasOwnProperty.call(properties, field) ? properties[field] : undefined;
+}
+
 function isMissing(v) { return v === null || v === undefined || (typeof v === "string" && v.trim() === ""); }
 
 /* Property names, in first-seen order, from a sample of features. */
@@ -74,7 +81,7 @@ function fieldIsNumeric(ds, field) {
   const distinct = new Set();
   const n = Math.min(ds.features.length, FIELD_SAMPLE);
   for (let i = 0; i < n; i++) {
-    const v = ds.features[i].properties[field];
+    const v = propOf(ds.features[i].properties, field);
     if (isMissing(v)) continue;
     present++;
     const x = numericValue(v);
@@ -88,7 +95,7 @@ function fieldIsNumeric(ds, field) {
 function buildCategories(ds, field) {
   const byKey = new Map();
   ds.features.forEach(function (f) {
-    const v = f.properties[field];
+    const v = propOf(f.properties, field);
     if (isMissing(v)) return;
     const key = normalizeValue(v);
     const entry = byKey.get(key);
@@ -135,7 +142,7 @@ function niceNumber(x) {
 /* Quantile ranges (up to 5 classes) for numeric fields. */
 function buildRanges(ds, field) {
   const values = [];
-  ds.features.forEach(function (f) { const x = numericValue(f.properties[field]); if (x !== null) values.push(x); });
+  ds.features.forEach(function (f) { const x = numericValue(propOf(f.properties, field)); if (x !== null) values.push(x); });
   values.sort(function (a, b) { return a - b; });
   const breaks = [];
   const k = Math.min(5, new Set(values).size);
@@ -178,7 +185,7 @@ function setColourBy(ds, field, mode, reverse) {
   let missing = 0, other = 0;
   if (mode === "ranges") byField.classes.forEach(function (c) { c.count = 0; });
   ds.features.forEach(function (f, i) {
-    const c = classifyValue(byField, f.properties[field]);
+    const c = classifyValue(byField, propOf(f.properties, field));
     classOf[i] = c;
     if (c === CLASS_MISSING) missing++;
     else if (c === CLASS_OTHER) other++;
@@ -393,7 +400,7 @@ function renderStyleEditor(ds) {
 function smallCategoryCount(ds, field) {
   const distinct = new Set();
   for (let i = 0; i < ds.features.length && distinct.size <= 12; i++) {
-    const v = ds.features[i].properties[field];
+    const v = propOf(ds.features[i].properties, field);
     if (!isMissing(v)) distinct.add(normalizeValue(v));
   }
   return distinct.size <= 12;
