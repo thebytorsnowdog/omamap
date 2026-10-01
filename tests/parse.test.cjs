@@ -102,10 +102,61 @@ test("CSV with lat/lon builds points and keeps cells as strings", async () => {
   assert.deepEqual(ds.geojson.features[1].geometry.coordinates, [-3.9, 56.1]);
 });
 
-test("CSV rejects partial numbers, ragged rows and easting/northing", () => {
+test("CSV rejects partial numbers and ragged rows", () => {
   assert.throws(() => P.csvToGeoJSON("lat,lon\n55.9abc,-3.2\n"), /complete numeric/);
   assert.throws(() => P.csvToGeoJSON("lat,lon\n55.9,-3.2,extra\n"), /number of cells|malformed/);
-  assert.throws(() => P.csvToGeoJSON("easting,northing\n325000,673000\n"), /Easting\/northing/);
+  assert.throws(() => P.csvToGeoJSON("name,value\nA,1\n"), /coordinate columns/);
+});
+
+// Reference values from PROJ (pyproj, EPSG:27700 -> EPSG:4326).
+const BNG_REFERENCE = {
+  "Edinburgh Castle": [-3.1998812, 55.9485944, 325165, 673490],
+  "Glasgow George Sq": [-4.2543527, 55.8625381, 259010, 665560],
+  "Stirling": [-3.939712, 56.1189872, 279500, 693500],
+  "Land's End": [-5.7150377, 50.0678449, 134250, 25250],
+  "Lerwick": [-1.1426065, 60.1552037, 447700, 1141500],
+  "Norwich": [1.2936135, 52.6284194, 623000, 308500],
+  "Far west": [-7.9899075, 54.2465121, 10000, 500000]
+};
+const metres = (a, b) => {
+  const dy = (a[1] - b[1]) * 111320, dx = (a[0] - b[0]) * 111320 * Math.cos(a[1] * Math.PI / 180);
+  return Math.hypot(dx, dy);
+};
+
+test("British National Grid converts to WGS84 within 1 m of PROJ", () => {
+  for (const [place, [lon, lat, e, n]] of Object.entries(BNG_REFERENCE)) {
+    const got = P.bngToWgs84(e, n);
+    assert.ok(metres(got, [lon, lat]) < 1, place + " off by " + metres(got, [lon, lat]).toFixed(2) + " m");
+  }
+});
+
+test("easting/northing CSV is converted, with a note", async () => {
+  const [ds] = await P.parseBytes("bng.csv", bytes("Asset,Easting,Northing\nCastle,325165,673490\nSquare,259010,665560\n"));
+  assert.ok(metres(ds.geojson.features[0].geometry.coordinates, [-3.1998812, 55.9485944]) < 1);
+  assert.equal(ds.geojson.features[1].properties.Asset, "Square");
+  assert.match(ds.warnings[0], /British National Grid/);
+});
+
+test("x/y CSV is read as lon/lat or BNG depending on the values", async () => {
+  const [wgs] = await P.parseBytes("a.csv", bytes("x,y\n-3.2,55.95\n"));
+  assert.deepEqual(wgs.geojson.features[0].geometry.coordinates, [-3.2, 55.95]);
+  assert.deepEqual(wgs.warnings, []);
+  const [grid] = await P.parseBytes("b.csv", bytes("x,y\n325165,673490\n"));
+  assert.ok(metres(grid.geojson.features[0].geometry.coordinates, [-3.1998812, 55.9485944]) < 1);
+});
+
+test("BNG CSV rejects values outside the grid", () => {
+  assert.throws(() => P.csvToGeoJSON("easting,northing\n900000,100\n"), /outside the British National Grid/);
+});
+
+test("GeoJSON declaring EPSG:27700 is converted", async () => {
+  const fc = { type: "FeatureCollection", crs: { type: "name", properties: { name: "urn:ogc:def:crs:EPSG::27700" } },
+    features: [{ type: "Feature", properties: { id: 1 }, geometry: { type: "LineString", coordinates: [[325165, 673490], [259010, 665560]] } }] };
+  const [ds] = await P.parseBytes("qgis.geojson", bytes(JSON.stringify(fc)));
+  const line = ds.geojson.features[0].geometry.coordinates;
+  assert.ok(metres(line[0], [-3.1998812, 55.9485944]) < 1);
+  assert.ok(metres(line[1], [-4.2543527, 55.8625381]) < 1);
+  assert.match(ds.warnings[0], /EPSG:27700/);
 });
 
 test("zipped shapefile fixture loads one point", async () => {

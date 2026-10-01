@@ -260,6 +260,42 @@ function fixtures(dir) {
     assert.equal(await page.locator("#table-panel").isHidden(), true);
   });
 
+  // Draw a row of points with each renderer and check the pixels land where
+  // Leaflet says the points are.
+  for (const renderer of ["webgl", "2d"]) {
+    await check("point renderer (" + renderer + ") draws points where they are", async () => {
+      const result = await page.evaluate(async (mode) => {
+        FastPoints.disableWebGL = mode === "2d";
+        clearAll();
+        const feats = [];
+        for (let i = 0; i < 20; i++) feats.push({ type: "Feature", properties: { i: i }, geometry: { type: "Point", coordinates: [-3 + i * 0.02, 56] } });
+        const ds = addDataset({ name: "px", geojson: { type: "FeatureCollection", features: feats } });
+        await new Promise((r) => { STATE.map.once("moveend", r); STATE.map.setView([56, -2.8], 10, { animate: false }); });
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const layer = ds.layer;
+        // Copy the points canvas onto a 2D canvas so both modes read the same way.
+        const copy = document.createElement("canvas");
+        copy.width = layer._canvas.width; copy.height = layer._canvas.height;
+        if (mode === "webgl") layer._draw();   // WebGL buffers are only readable in the frame they are drawn
+        copy.getContext("2d").drawImage(layer._canvas, 0, 0);
+        const ctx = copy.getContext("2d");
+        const dpr = window.devicePixelRatio || 1;
+        const alphaAt = (x, y) => ctx.getImageData(Math.round(x * dpr), Math.round(y * dpr), 1, 1).data[3];
+        const hits = [], misses = [];
+        for (let i = 0; i < 20; i++) {
+          const p = layer._layerPoint(i).subtract(layer._pxBounds.min);
+          hits.push(alphaAt(p.x, p.y));
+          misses.push(alphaAt(p.x, p.y + 30));   // well clear of any point
+        }
+        FastPoints.disableWebGL = false;
+        return { mode: layer._mode, hits: hits, misses: misses };
+      }, renderer);
+      assert.equal(result.mode, renderer);
+      assert.ok(result.hits.every((a) => a > 150), "point centres not drawn: " + result.hits);
+      assert.ok(result.misses.every((a) => a === 0), "pixels drawn where no point is: " + result.misses);
+    });
+  }
+
   await check("no page errors", async () => { assert.deepEqual(errors, []); });
 
   await browser.close();

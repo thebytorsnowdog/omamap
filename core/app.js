@@ -75,13 +75,24 @@ const FALLBACK_PALETTE = ["#7aa2f7", "#9ece6a", "#bb9af7", "#7dcfff", "#e0af68",
 
 function isHex(v) { return typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v); }
 
-function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+// Theme values are read for every feature when styling, so cache them; the
+// cache is cleared whenever the theme changes.
+const cssCache = new Map();
+function cssVar(name) {
+  let v = cssCache.get(name);
+  if (v === undefined) {
+    v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    cssCache.set(name, v);
+  }
+  return v;
+}
 
 /* Called by the host with the parsed colors.toml, mode and UI font. */
 function applyTheme(theme) {
   theme = theme || {};
   const colors = theme.colors || {};
   const rootStyle = document.documentElement.style;
+  cssCache.clear();
   Object.keys(THEME_VARS).forEach(function (key) {
     if (isHex(colors[key])) rootStyle.setProperty(THEME_VARS[key], colors[key]);
   });
@@ -176,7 +187,7 @@ function eachLeaf(layer, fn) {
 function leafStyle(leaf, colour, style, selected) {
   const accent = cssVar("--accent");
   const outline = style.outline === "fg" ? cssVar("--fg") : style.outline === "bg" ? cssVar("--bg-deep") : null;
-  if (leaf instanceof L.CircleMarker) {
+  if (leaf.isFastPoint || leaf instanceof L.CircleMarker) {
     if (selected) return { radius: style.radius + 3.5, color: accent, weight: 3, fillColor: colour, fillOpacity: 1, opacity: 1 };
     return {
       radius: style.radius, fillColor: colour, fillOpacity: style.fillOpacity,
@@ -222,13 +233,18 @@ function addDataset(parsed) {
   if (STATE.datasets.length >= MAX_DATASETS) throw new Error("Dataset limit reached (" + MAX_DATASETS + "). Remove one first.");
   const geojson = parsed.geojson;
   let index = 0;
-  const layers = [];
-  const layer = L.geoJSON(geojson, {
-    renderer: STATE.renderer,
-    interactive: false,     // selection is done by our own hit-testing
-    pointToLayer: function (feature, latlng) { return L.circleMarker(latlng, { renderer: STATE.renderer, interactive: false }); },
-    onEachFeature: function (feature, lyr) { lyr._omaIndex = index++; layers.push(lyr); }
-  });
+  let layers = [];
+  // Point-only data uses the batched point renderer; everything else Leaflet's canvas.
+  let layer = fastPointsFor(geojson.features);
+  if (layer) layers = layer.getLayers();
+  else {
+    layer = L.geoJSON(geojson, {
+      renderer: STATE.renderer,
+      interactive: false,     // selection is done by our own hit-testing
+      pointToLayer: function (feature, latlng) { return L.circleMarker(latlng, { renderer: STATE.renderer, interactive: false }); },
+      onEachFeature: function (feature, lyr) { lyr._omaIndex = index++; layers.push(lyr); }
+    });
+  }
   const ds = {
     id: "ds-" + (STATE.nextId++),
     name: String(parsed.name || "Untitled").slice(0, 200),
@@ -412,6 +428,7 @@ function renderLayerList() {
    rendered path or marker (_containsPoint). We use it directly so a click can
    report every feature under the cursor, not just the topmost. */
 function layerContains(layer, point) {
+  if (layer.isFastPoint) return layer._containsPoint(point);
   if (layer instanceof L.Path) return typeof layer._containsPoint === "function" && !!layer._containsPoint(point);
   if (typeof layer.getLayers === "function") return layer.getLayers().some(function (child) { return layerContains(child, point); });
   return false;

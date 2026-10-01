@@ -183,11 +183,109 @@
     return { type: "FeatureCollection", features: features, coordinateCount: counter.count };
   }
 
+  /* ------------------------ British National Grid ------------------------ */
+  // OSGB36 / British National Grid (EPSG:27700) to WGS84, using the Ordnance
+  // Survey transverse Mercator formulas and a 7-parameter Helmert shift.
+  // Accurate to roughly 5 m, which suits viewing and inspection.
+
+  const BNG = { minE: 0, maxE: 700000, minN: 0, maxN: 1300000 };
+
+  function inBng(e, n) { return e >= BNG.minE && e <= BNG.maxE && n >= BNG.minN && n <= BNG.maxN; }
+
+  function bngToWgs84(easting, northing) {
+    const a = 6377563.396, b = 6356256.909, F0 = 0.9996012717;
+    const lat0 = 49 * Math.PI / 180, lon0 = -2 * Math.PI / 180, N0 = -100000, E0 = 400000;
+    const e2 = 1 - (b * b) / (a * a), n = (a - b) / (a + b), n2 = n * n, n3 = n2 * n;
+    let lat = lat0, M = 0;
+    do {
+      lat = (northing - N0 - M) / (a * F0) + lat;
+      const dl = lat - lat0, sl = lat + lat0;
+      M = b * F0 * ((1 + n + 1.25 * n2 + 1.25 * n3) * dl
+        - (3 * n + 3 * n2 + 2.625 * n3) * Math.sin(dl) * Math.cos(sl)
+        + (1.875 * n2 + 1.875 * n3) * Math.sin(2 * dl) * Math.cos(2 * sl)
+        - (35 / 24) * n3 * Math.sin(3 * dl) * Math.cos(3 * sl));
+    } while (Math.abs(northing - N0 - M) >= 0.00001);
+    const sin = Math.sin(lat), cos = Math.cos(lat), tan = Math.tan(lat);
+    const nu = a * F0 / Math.sqrt(1 - e2 * sin * sin);
+    const rho = a * F0 * (1 - e2) / Math.pow(1 - e2 * sin * sin, 1.5);
+    const eta2 = nu / rho - 1;
+    const t2 = tan * tan, t4 = t2 * t2, t6 = t4 * t2, sec = 1 / cos;
+    const VII = tan / (2 * rho * nu);
+    const VIII = tan / (24 * rho * Math.pow(nu, 3)) * (5 + 3 * t2 + eta2 - 9 * t2 * eta2);
+    const IX = tan / (720 * rho * Math.pow(nu, 5)) * (61 + 90 * t2 + 45 * t4);
+    const X = sec / nu;
+    const XI = sec / (6 * Math.pow(nu, 3)) * (nu / rho + 2 * t2);
+    const XII = sec / (120 * Math.pow(nu, 5)) * (5 + 28 * t2 + 24 * t4);
+    const XIIA = sec / (5040 * Math.pow(nu, 7)) * (61 + 662 * t2 + 1320 * t4 + 720 * t6);
+    const dE = easting - E0;
+    const latA = lat - VII * dE * dE + VIII * Math.pow(dE, 4) - IX * Math.pow(dE, 6);
+    const lonA = lon0 + X * dE - XI * Math.pow(dE, 3) + XII * Math.pow(dE, 5) - XIIA * Math.pow(dE, 7);
+
+    // OSGB36 geodetic -> cartesian (Airy 1830), Helmert to WGS84, -> geodetic.
+    const sA = Math.sin(latA), cA = Math.cos(latA);
+    const nuA = a / Math.sqrt(1 - e2 * sA * sA);
+    const x1 = nuA * cA * Math.cos(lonA), y1 = nuA * cA * Math.sin(lonA), z1 = (1 - e2) * nuA * sA;
+    const tx = 446.448, ty = -125.157, tz = 542.060, s = -20.4894e-6;
+    const sec2rad = Math.PI / (180 * 3600);
+    const rx = 0.1502 * sec2rad, ry = 0.2470 * sec2rad, rz = 0.8421 * sec2rad;
+    const x2 = tx + (1 + s) * x1 - rz * y1 + ry * z1;
+    const y2 = ty + rz * x1 + (1 + s) * y1 - rx * z1;
+    const z2 = tz - ry * x1 + rx * y1 + (1 + s) * z1;
+    const aW = 6378137, bW = 6356752.3142, e2W = 1 - (bW * bW) / (aW * aW);
+    const p = Math.sqrt(x2 * x2 + y2 * y2);
+    let phi = Math.atan2(z2, p * (1 - e2W)), prev;
+    do {
+      prev = phi;
+      const nuW = aW / Math.sqrt(1 - e2W * Math.sin(phi) * Math.sin(phi));
+      phi = Math.atan2(z2 + e2W * nuW * Math.sin(phi), p);
+    } while (Math.abs(phi - prev) > 1e-12);
+    const lambda = Math.atan2(y2, x2);
+    return [Math.round(lambda * 180 / Math.PI * 1e7) / 1e7, Math.round(phi * 180 / Math.PI * 1e7) / 1e7];
+  }
+
+  /* Transform every position in GeoJSON-shaped data from BNG to WGS84.
+     Shape problems are left for validateFeatureCollection to report. */
+  function reprojectBng(value, depth, counter) {
+    if (depth > LIMITS.geometryDepth + 6 || !Array.isArray(value)) return value;
+    if (value.length >= 2 && value.length <= 4 && typeof value[0] === "number" && typeof value[1] === "number") {
+      if (++counter.count > LIMITS.coordinates) throw new Error("Dataset exceeds the coordinate limit.");
+      if (!inBng(value[0], value[1])) throw new Error("A coordinate is outside the British National Grid area.");
+      return bngToWgs84(value[0], value[1]).concat(value.slice(2));
+    }
+    return value.map(function (v) { return reprojectBng(v, depth + 1, counter); });
+  }
+
+  // GeoJSON written by older tools (e.g. QGIS) may declare a named CRS.
+  function declaresBng(data) {
+    const crs = data && data.crs;
+    const name = crs && crs.properties && typeof crs.properties.name === "string" ? crs.properties.name : "";
+    return /(^|[^0-9])27700$/.test(name.trim());
+  }
+
+  function reprojectGeoJsonBng(data) {
+    const counter = { count: 0 };
+    const geom = function (g) {
+      if (!g || typeof g !== "object") return g;
+      if (g.type === "GeometryCollection" && Array.isArray(g.geometries)) return Object.assign({}, g, { geometries: g.geometries.map(geom) });
+      return Object.assign({}, g, { coordinates: reprojectBng(g.coordinates, 0, counter) });
+    };
+    if (data.type === "FeatureCollection" && Array.isArray(data.features)) {
+      return Object.assign({}, data, { features: data.features.map(function (f) { return f && typeof f === "object" ? Object.assign({}, f, { geometry: geom(f.geometry) }) : f; }) });
+    }
+    if (data.type === "Feature") return Object.assign({}, data, { geometry: geom(data.geometry) });
+    return geom(data);
+  }
+
   function jsonToGeoJSON(text) {
     let data;
     try { data = JSON.parse(text); }
     catch (e) { throw new Error("File is not valid JSON."); }
     if (!data || typeof data !== "object") throw new Error("JSON did not contain an object.");
+    if (declaresBng(data)) {
+      const fc = validateFeatureCollection(reprojectGeoJsonBng(data));
+      fc.notes = ["Converted from British National Grid (EPSG:27700)."];
+      return fc;
+    }
     return validateFeatureCollection(data);
   }
 
@@ -221,24 +319,48 @@
       if (!Array.isArray(row) || row.length !== fields.length) throw new Error("CSV row " + (index + 2) + " has a different number of cells from its header.");
     });
     const normal = fields.map(function (field) { return String(field).toLowerCase().trim().replace(/[\s_-]+/g, ""); });
-    const latAliases = ["lat", "latitude", "y", "ycoord", "ycoordinate", "gpsy"];
-    const lonAliases = ["lon", "lng", "long", "longitude", "x", "xcoord", "xcoordinate", "gpsx"];
-    const projected = normal.some(function (field) { return field === "easting" || field === "northing"; });
-    const latIndex = normal.findIndex(function (field) { return latAliases.indexOf(field) >= 0; });
-    const lonIndex = normal.findIndex(function (field) { return lonAliases.indexOf(field) >= 0; });
-    if (latIndex < 0 || lonIndex < 0) {
-      if (projected) throw new Error("Easting/northing CSV is not supported yet. Reproject it to WGS84 latitude/longitude before import.");
-      throw new Error("CSV needs WGS84 latitude and longitude columns (e.g. lat/lon).");
+    const find = function (aliases) { return normal.findIndex(function (f) { return aliases.indexOf(f) >= 0; }); };
+    const latIndex = find(["lat", "latitude", "gpsy", "wgs84lat", "wgs84latitude"]);
+    const lonIndex = find(["lon", "lng", "long", "longitude", "gpsx", "wgs84lon", "wgs84longitude"]);
+    const eIndex = find(["easting", "eastings", "east", "bngeasting", "osgbeasting", "gridx"]);
+    const nIndex = find(["northing", "northings", "north", "bngnorthing", "osgbnorthing", "gridy"]);
+    const xIndex = find(["x", "xcoord", "xcoordinate"]);
+    const yIndex = find(["y", "ycoord", "ycoordinate"]);
+
+    // Work out which coordinate columns to use and in which system.
+    let xi, yi, grid;
+    if (latIndex >= 0 && lonIndex >= 0) { xi = lonIndex; yi = latIndex; grid = false; }
+    else if (eIndex >= 0 && nIndex >= 0) { xi = eIndex; yi = nIndex; grid = true; }
+    else if (xIndex >= 0 && yIndex >= 0) {
+      xi = xIndex; yi = yIndex;
+      // x/y could be either: decide from the values.
+      grid = rows.some(function (row) {
+        const x = Number(String(row[xi]).trim()), y = Number(String(row[yi]).trim());
+        return Number.isFinite(x) && Number.isFinite(y) && (Math.abs(x) > 180 || Math.abs(y) > 90);
+      });
+    } else {
+      throw new Error("CSV needs coordinate columns: latitude/longitude (WGS84) or easting/northing (British National Grid).");
     }
+
     const features = rows.map(function (row, rowIndex) {
-      const lat = exactCoordinate(row[latIndex], "Row " + (rowIndex + 2) + " latitude");
-      const lon = exactCoordinate(row[lonIndex], "Row " + (rowIndex + 2) + " longitude");
-      if (lat < -90 || lat > 90 || lon < -180 || lon > 180) throw new Error("Row " + (rowIndex + 2) + " is outside WGS84 bounds.");
+      const where = "Row " + (rowIndex + 2);
+      const x = exactCoordinate(row[xi], where + (grid ? " easting" : " longitude"));
+      const y = exactCoordinate(row[yi], where + (grid ? " northing" : " latitude"));
+      let coordinates;
+      if (grid) {
+        if (!inBng(x, y)) throw new Error(where + " is outside the British National Grid area (easting 0–700000, northing 0–1300000).");
+        coordinates = bngToWgs84(x, y);
+      } else {
+        if (y < -90 || y > 90 || x < -180 || x > 180) throw new Error(where + " is outside WGS84 bounds.");
+        coordinates = [x, y];
+      }
       const properties = {};
       fields.forEach(function (field, fieldIndex) { properties[field] = row[fieldIndex]; });
-      return { type: "Feature", geometry: { type: "Point", coordinates: [lon, lat] }, properties: properties };
+      return { type: "Feature", geometry: { type: "Point", coordinates: coordinates }, properties: properties };
     });
-    return validateFeatureCollection({ type: "FeatureCollection", features: features });
+    const fc = validateFeatureCollection({ type: "FeatureCollection", features: features });
+    if (grid) fc.notes = ["Converted from British National Grid (EPSG:27700) easting/northing."];
+    return fc;
   }
 
   /* --------------------------- KML / GPX --------------------------------- */
@@ -443,9 +565,9 @@
         const raw = await shapefileParts({ shp: bytes, dbf: entries.get(stem + ".dbf"), prj: entries.get(stem + ".prj"), cpg: entries.get(stem + ".cpg") });
         layers.push({ name: label, geojson: validateFeatureCollection(raw), warnings: entries.has(stem + ".prj") ? [] : ["No .prj file: coordinates were assumed to be WGS84."] });
       } else if (/\.(geojson|json)$/.test(filename)) {
-        layers.push({ name: label, geojson: jsonToGeoJSON(decodeText(bytes)) });
+        layers.push(withNotes(label, jsonToGeoJSON(decodeText(bytes))));
       } else if (filename.endsWith(".csv")) {
-        layers.push({ name: label, geojson: csvToGeoJSON(decodeText(bytes)) });
+        layers.push(withNotes(label, csvToGeoJSON(decodeText(bytes))));
       }
     }
     if (!layers.length) throw new Error("ZIP contains no shapefile, GeoJSON or CSV layers.");
@@ -453,6 +575,13 @@
   }
 
   /* ----------------------------- Dispatch -------------------------------- */
+
+  // Conversion notes travel with the dataset and show in the dataset list.
+  function withNotes(name, fc) {
+    const notes = fc.notes || [];
+    delete fc.notes;
+    return { name: name, geojson: fc, warnings: notes };
+  }
 
   /* Parse one file's bytes into a list of { name, geojson, warnings } datasets.
      KML/GPX are routed to xmlToGeoJSON by the caller on the main thread. */
@@ -462,12 +591,12 @@
     if (ext === "zip") return zipToDatasets(buffer, name);
     if (buffer.byteLength > LIMITS.fileBytes) throw new Error("File is too large (limit " + Math.round(LIMITS.fileBytes / 1048576) + " MiB).");
     const text = decodeText(new Uint8Array(buffer));
-    if (ext === "csv" || ext === "tsv" || ext === "txt") return [{ name: display, geojson: csvToGeoJSON(text) }];
-    if (ext === "geojson" || ext === "json") return [{ name: display, geojson: jsonToGeoJSON(text) }];
+    if (ext === "csv" || ext === "tsv" || ext === "txt") return [withNotes(display, csvToGeoJSON(text))];
+    if (ext === "geojson" || ext === "json") return [withNotes(display, jsonToGeoJSON(text))];
     if (ext === "kml" || ext === "gpx") return [{ name: display, geojson: xmlToGeoJSON(text, ext) }];
     // Unknown extension: try JSON, then CSV.
-    try { return [{ name: display, geojson: jsonToGeoJSON(text) }]; }
-    catch (e) { return [{ name: display, geojson: csvToGeoJSON(text) }]; }
+    try { return [withNotes(display, jsonToGeoJSON(text))]; }
+    catch (e) { return [withNotes(display, csvToGeoJSON(text))]; }
   }
 
   async function parseShapefileSet(name, parts) {
@@ -493,6 +622,7 @@
     csvToGeoJSON: csvToGeoJSON,
     xmlToGeoJSON: xmlToGeoJSON,
     inspectZipMetadata: inspectZipMetadata,
+    bngToWgs84: bngToWgs84,
     extractZip: extractZip,
     parseBytes: parseBytes,
     parseShapefileSet: parseShapefileSet
