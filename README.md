@@ -64,9 +64,9 @@ The table draws only the rows on screen, so it stays quick with large datasets.
 
 British National Grid data (EPSG:27700) is converted to WGS84 automatically, to within about 5 m (the same 7-parameter method PROJ uses without grid files). That covers easting/northing CSV, GeoJSON that declares EPSG:27700 (as older QGIS exports do), and shapefiles with a BNG `.prj`. The dataset list notes when a conversion happened.
 
-Imports are validated before anything reaches the map. Malformed geometry, unsafe property names, ZIP bombs and inconsistent archives are rejected with a reason. Parsing runs in a background worker so large files don't freeze the window.
+Imports are validated before anything reaches the map. Malformed geometry, unsafe property names, ZIP bombs, inconsistent archives and shapefile headers that don't fit their file are rejected with a reason. Parsing runs in a background worker so large files don't freeze the window (KML and GPX are the exception: they are read on the main thread).
 
-Limits: 100 MiB per file, 50 MiB per ZIP (250 MiB expanded), 500,000 features and 5 million coordinates per dataset, 50 datasets.
+Limits: 100 MiB per file, 50 MiB per ZIP (250 MiB expanded, at most 50 layers and 1,000,000 features across them), 500,000 features, 5 million coordinates, 1,000 attribute names and 500 attributes per feature per dataset, 10 million values per CSV or shapefile table, 50 datasets.
 
 Point datasets are drawn on the GPU (WebGL), so hundreds of thousands of points pan and zoom smoothly. Where WebGL isn't available, a 2D fallback is used. Lines and polygons use Leaflet's canvas renderer, which handles tens of thousands of shapes comfortably.
 
@@ -84,7 +84,11 @@ Your data files never leave your machine. Only basemap tiles are fetched over th
 
 Tile requests reveal the area you are viewing to that provider. The window can't contact any other host. A Content Security Policy in the page and a request filter in the host both enforce this.
 
-Viewed tiles are kept in an ordinary HTTP cache (`~/.cache/omamap`, up to 512 MiB) that follows each provider's caching headers. OmaMap never downloads areas in bulk or ahead of time. The last map view and basemap choice are remembered in `~/.local/share/omamap`.
+Viewed tiles are kept in an ordinary HTTP cache (`~/.cache/omamap`, up to 512 MiB) that follows each provider's caching headers. OmaMap never downloads areas in bulk or ahead of time. The last map view and basemap choice are remembered in `~/.local/share/omamap`, the folder you last saved a profile to in `~/.config/omamap`, and recently opened files (for the bar widget) in `~/.local/state/omamap/recent.json`, readable only by you.
+
+There is no telemetry, crash reporting or update check. Links in your data (`http`/`https` only) open in your browser when you click them.
+
+See [SECURITY.md](SECURITY.md) for the threat model, what OmaMap defends against, its known limits, and how to report a vulnerability.
 
 ### Map data terms
 
@@ -147,9 +151,9 @@ cmake -S host -B build && cmake --build build
 ./build/omamap --new-window some.geojson     # runs against core/ in this checkout
 
 npm install                 # playwright-core, for the browser tests
-npm test                    # parser and validation tests
-npm run test:browser        # drives core/ in Chromium (CHROMIUM=/usr/bin/chromium)
-tests/host-smoke.sh         # headless checks of the native host (run test:browser first)
+npm test                    # parser, validation, bar widget and vendor-hash tests
+npm run test:browser        # drives core/ in Chromium, incl. hostile-input tests (CHROMIUM=/usr/bin/chromium)
+tests/host-smoke.sh         # headless checks of the native host and its hardening (run test:browser first)
 npm run serve               # core/ at http://127.0.0.1:8765 for quick UI work
 ```
 

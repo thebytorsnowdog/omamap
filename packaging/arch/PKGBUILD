@@ -4,7 +4,7 @@
 # For the AUR, replace the local source with the published git repository
 # (pinned to a tag or commit) and give it a checksum.
 pkgname=omamap
-pkgver=0.3.1
+pkgver=0.3.2
 pkgrel=1
 pkgdesc="View GeoJSON, KML, GPX, CSV and shapefiles over street and satellite maps"
 arch=(x86_64 aarch64)

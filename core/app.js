@@ -1033,7 +1033,7 @@ function profileSaved(path) {
   setStatus("Saved profile to " + String(path || "").slice(0, 300) + ".");
 }
 
-window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, setHost: setHost, profileSaved: profileSaved, version: "0.3.1" };
+window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, setHost: setHost, profileSaved: profileSaved, version: "0.3.2" };
 
 /* -------------------------------- Wiring --------------------------------- */
 function wireDragDrop() {
