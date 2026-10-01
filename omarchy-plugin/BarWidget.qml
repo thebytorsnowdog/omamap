@@ -28,6 +28,13 @@ BarWidget {
     return String(value || "").replace(/[\x00-\x1f\x7f]+/g, " ").slice(0, limit)
   }
 
+  // "/home/me/maps" -> "~/maps", but only for the home directory itself.
+  function tidyFolder(dir) {
+    var home = Quickshell.env("HOME") || ""
+    if (home && (dir === home || dir.indexOf(home + "/") === 0)) return "~" + dir.slice(home.length)
+    return dir
+  }
+
   function applyRecent(raw) {
     try {
       if (typeof raw !== "string" || raw.length > 262144) { root.recent = []; return }
@@ -43,7 +50,7 @@ BarWidget {
         out.push({
           path: path,
           name: root.clean(e.name || path.slice(slash + 1), 120),
-          folder: path.slice(0, slash).replace(Quickshell.env("HOME"), "~"),
+          folder: root.clean(root.tidyFolder(path.slice(0, slash)), 4096),
           profile: e.kind === "profile"
         })
       }
@@ -53,11 +60,13 @@ BarWidget {
     }
   }
 
+  // Launch with an argument vector, never a shell command line: nothing in a
+  // file name (quotes, $(...), backticks, newlines) is interpreted, and "--"
+  // stops a name that starts with "-" being read as an option.
   function openOmaMap(path) {
     root.popupOpen = false
-    if (!root.bar) return
-    if (!root.installed) { root.bar.run("xdg-open " + root.bar.shellQuote(root.homepage)); return }
-    root.bar.run(path ? "omamap " + root.bar.shellQuote(path) : "omamap")
+    if (!root.installed) { Quickshell.execDetached(["xdg-open", root.homepage]); return }
+    Quickshell.execDetached(path ? ["omamap", "--", String(path)] : ["omamap"])
   }
 
   implicitWidth: button.implicitWidth
