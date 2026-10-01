@@ -1,5 +1,8 @@
 # Builds OmaMap from this checkout:  cd packaging/arch && makepkg -si
-# For the AUR, replace the local source with the published git repository.
+# It builds the working tree as it is, including uncommitted changes.
+# Nothing is downloaded: the web libraries are vendored and hash-checked.
+# For the AUR, replace the local source with the published git repository
+# (pinned to a tag or commit) and give it a checksum.
 pkgname=omamap
 pkgver=0.3.1
 pkgrel=1
@@ -20,6 +23,8 @@ build() {
 
 check() {
   cd "$_src"
+  # Bundled libraries must be the pinned releases.
+  (cd core/vendor && sha256sum --check --quiet SHA256SUMS)
   node --test tests/
 }
 
