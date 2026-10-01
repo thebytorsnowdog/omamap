@@ -290,3 +290,69 @@ test("validated geometry keeps only GeoJSON members", () => {
   const fc = P.validateFeatureCollection({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [1, 2], extra: "x".repeat(1000), bbox: [1, 2, 1, 2] } });
   assert.deepEqual(Object.keys(fc.features[0].geometry), ["type", "coordinates"]);
 });
+
+/* ------------------------- Resource limits ------------------------------ */
+
+test("a CSV with more rows than the feature limit stops early with a clear error", () => {
+  // Before: every row became a feature before the limit was checked, so a
+  // 100 MiB CSV of short rows needed gigabytes and crashed the page.
+  const csv = "lat,lon\n" + "1,1\n".repeat(P.LIMITS.features + 1);
+  assert.throws(() => P.csvToGeoJSON(csv), /more than 500,000 rows/);
+  // Exactly at the limit still loads.
+  assert.equal(P.csvToGeoJSON("lat,lon\n" + "1,1\n".repeat(P.LIMITS.features)).features.length, P.LIMITS.features);
+});
+
+test("chunked CSV parsing keeps quoted newlines and commas across chunk boundaries", () => {
+  const rows = [];
+  for (let i = 0; i < 40000; i++) rows.push('1,2,"line ' + i + '\nsecond, line ""quoted"""');
+  const fc = P.csvToGeoJSON("lat,lon,note\n" + rows.join("\n") + "\n");
+  assert.equal(fc.features.length, 40000);
+  assert.equal(fc.features[39999].properties.note, 'line 39999\nsecond, line "quoted"');
+  assert.throws(() => P.csvToGeoJSON("lat,lon,note\n" + rows.join("\n") + '\n1,2,"unterminated\n'), /malformed/);
+});
+
+test("a CSV with too many columns is rejected before rows are built", () => {
+  const header = ["lat", "lon"].concat(Array.from({ length: 600 }, (_, i) => "c" + i)).join(",");
+  assert.throws(() => P.csvToGeoJSON(header + "\n" + "1,".repeat(601) + "1\n"), /more than 500 columns/);
+});
+
+test("deeply nested GeoJSON arrays fail cleanly, not with a stack overflow", () => {
+  const deep = "[".repeat(100000) + "]".repeat(100000);
+  assert.throws(() => P.jsonToGeoJSON(deep), /nested too deeply/);
+  // Two levels of layer arrays still work.
+  const fc = JSON.parse(POINT_FC);
+  assert.equal(P.jsonToGeoJSON(JSON.stringify([[fc, fc], [fc]])).features.length, 3);
+});
+
+test("a dataset may not invent more than 1,000 attribute names", () => {
+  // Each name becomes a table column and a colour-by option; millions froze the UI.
+  const features = Array.from({ length: 1001 }, (_, i) => ({ type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: { ["f" + i]: 1 } }));
+  assert.throws(() => P.validateFeatureCollection({ type: "FeatureCollection", features }), /more than 1,000 different attribute names/);
+  assert.equal(P.validateFeatureCollection({ type: "FeatureCollection", features: features.slice(0, 1000) }).features.length, 1000);
+});
+
+test("feature IDs are bounded in length", () => {
+  const f = (id) => ({ type: "Feature", id: id, geometry: { type: "Point", coordinates: [0, 0] }, properties: {} });
+  assert.throws(() => P.validateFeatureCollection(f("x".repeat(1001))), /feature ID exceeds/);
+  assert.equal(P.validateFeatureCollection(f("x".repeat(1000))).features[0].id.length, 1000);
+});
+
+test("a ZIP may hold at most 50 layers", async () => {
+  const files = {};
+  for (let i = 0; i < 51; i++) files["l" + i + ".geojson"] = POINT_FC;
+  await assert.rejects(P.parseBytes("many.zip", makeZip(files)), /more than 50 layers/);
+  delete files["l50.geojson"];
+  assert.equal((await P.parseBytes("fifty.zip", makeZip(files))).length, 50);
+});
+
+test("the layers of one ZIP together are capped at 1,000,000 features", async () => {
+  // Three layers under the per-dataset limit, but over the per-file total.
+  let seed = 1;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const csv = () => {
+    const rows = ["lat,lon"];
+    for (let i = 0; i < 340000; i++) rows.push((rnd() * 80).toFixed(4) + "," + (rnd() * 170).toFixed(4));
+    return rows.join("\n");
+  };
+  await assert.rejects(P.parseBytes("big.zip", makeZip({ "a.csv": csv(), "b.csv": csv(), "c.csv": csv() })), /together exceed 1,000,000 features/);
+});

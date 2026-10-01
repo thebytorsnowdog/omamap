@@ -19,8 +19,12 @@
     coordinates: 5000000,               // positions per dataset
     geometryDepth: 8,
     propertiesPerFeature: 500,
+    fieldsPerDataset: 1000,             // distinct attribute names
     propertyString: 100000,
-    propertyBytes: 200 * 1024 * 1024
+    propertyBytes: 200 * 1024 * 1024,
+    layersPerFile: 50,                  // datasets from one ZIP or profile
+    featuresPerFile: 1000000,           // all layers of one ZIP together
+    arrayNesting: 4                     // GeoJSON given as nested arrays of layers
   });
 
   const FORBIDDEN_PROPERTY_NAMES = ["__proto__", "prototype", "constructor"];
@@ -49,12 +53,15 @@
 
   /* ----------------------------- GeoJSON --------------------------------- */
 
-  function normalizeToFeatureCollection(geojson) {
+  function normalizeToFeatureCollection(geojson, depth) {
+    depth = depth || 0;
     if (!geojson || typeof geojson !== "object") throw new Error("Data must be a GeoJSON object.");
     if (Array.isArray(geojson)) {
+      // Bounded, so deeply nested arrays fail cleanly instead of exhausting the stack.
+      if (depth >= LIMITS.arrayNesting) throw new Error("GeoJSON layer arrays are nested too deeply.");
       const all = [];
       geojson.forEach(function (item, index) {
-        const part = normalizeToFeatureCollection(item);
+        const part = normalizeToFeatureCollection(item, depth + 1);
         if (!part.features.length) throw new Error("Layer " + index + " contained no features.");
         for (let i = 0; i < part.features.length; i++) all.push(part.features[i]);
       });
@@ -191,6 +198,9 @@
     if (fc.features.length > LIMITS.features) throw new Error("Dataset exceeds the " + LIMITS.features.toLocaleString() + " feature limit.");
     const counter = { count: 0 };
     const budget = { bytes: 0 };
+    // Every distinct attribute name becomes a table column and a "colour by"
+    // choice, so a dataset may not invent an unbounded number of them.
+    const fields = new Set();
     const features = new Array(fc.features.length);
     for (let index = 0; index < fc.features.length; index++) {
       const feature = fc.features[index];
@@ -198,6 +208,14 @@
       validateGeometry(feature.geometry, counter, 0);
       const props = feature.properties;
       if (props !== undefined && props !== null && (typeof props !== "object" || Array.isArray(props))) throw new Error("Feature properties must be a JSON object.");
+      if (props) {
+        for (const key in props) {
+          if (!fields.has(key)) {
+            fields.add(key);
+            if (fields.size > LIMITS.fieldsPerDataset) throw new Error("Dataset has more than " + LIMITS.fieldsPerDataset.toLocaleString() + " different attribute names.");
+          }
+        }
+      }
       const output = {
         type: "Feature",
         geometry: cleanGeometry(feature.geometry),
@@ -205,6 +223,7 @@
       };
       if (Object.prototype.hasOwnProperty.call(feature, "id") && feature.id != null) {
         if (!(typeof feature.id === "string" || (typeof feature.id === "number" && Number.isSafeInteger(feature.id)))) throw new Error("Feature IDs must be strings or safe integers.");
+        if (typeof feature.id === "string" && feature.id.length > 1000) throw new Error("A feature ID exceeds the 1,000 character limit.");
         output.id = feature.id;
       }
       features[index] = output;
@@ -336,11 +355,24 @@
 
   function csvToGeoJSON(text) {
     if (!text || !text.trim()) throw new Error("CSV file is empty.");
-    const parsed = root.Papa.parse(text, { header: false, dynamicTyping: false, skipEmptyLines: "greedy" });
-    if (parsed.errors && parsed.errors.length) throw new Error("CSV could not be parsed: malformed rows are not accepted.");
+    // Parse in chunks and stop one row past the feature limit. Parsing (or
+    // even line-splitting) all of a huge CSV first would exhaust memory before
+    // the limit could be checked.
+    const parsed = { data: [], errors: 0, tooMany: false };
+    root.Papa.parse(text, {
+      header: false, dynamicTyping: false, skipEmptyLines: "greedy", chunkSize: 1024 * 1024,
+      chunk: function (result, parser) {
+        parsed.errors += result.errors.length;
+        for (let i = 0; i < result.data.length; i++) parsed.data.push(result.data[i]);
+        if (parsed.data.length > LIMITS.features + 1) { parsed.tooMany = true; parser.abort(); }
+      }
+    });
+    if (parsed.tooMany) throw new Error("CSV has more than " + LIMITS.features.toLocaleString() + " rows (the feature limit).");
+    if (parsed.errors) throw new Error("CSV could not be parsed: malformed rows are not accepted.");
     if (parsed.data.length < 2) throw new Error("CSV has no data rows.");
     const fields = parsed.data[0];
     if (!Array.isArray(fields) || !fields.length) throw new Error("CSV headers are invalid.");
+    if (fields.length > LIMITS.propertiesPerFeature) throw new Error("CSV has more than " + LIMITS.propertiesPerFeature + " columns.");
     const headerKeys = new Set();
     fields.forEach(function (field, index) {
       const key = String(field).replace(/^﻿/, "").trim();
@@ -592,17 +624,27 @@
     try { entries = extractZip(arrayBuffer); }
     catch (error) { throw new Error("Could not read ZIP: " + safeMessage(error, "invalid or unsupported archive.")); }
     const layers = [];
-    const multiple = Array.from(entries.keys()).filter(function (n) { return /\.(shp|json|geojson|csv)$/.test(n); }).length > 1;
+    const layerCount = Array.from(entries.keys()).filter(function (n) { return /\.(shp|json|geojson|csv)$/.test(n); }).length;
+    if (layerCount > LIMITS.layersPerFile) throw new Error("ZIP contains more than " + LIMITS.layersPerFile + " layers.");
+    const multiple = layerCount > 1;
+    // Each layer is capped on its own; this caps them together, so many
+    // small layers cannot add up to more than memory can hold.
+    let total = 0;
+    const counted = function (layer) {
+      total += layer.geojson.features.length;
+      if (total > LIMITS.featuresPerFile) throw new Error("ZIP layers together exceed " + LIMITS.featuresPerFile.toLocaleString() + " features.");
+      layers.push(layer);
+    };
     for (const [filename, bytes] of entries) {
       const label = multiple ? baseName(zipName) + " / " + baseName(filename) : baseName(zipName);
       if (filename.endsWith(".shp")) {
         const stem = filename.slice(0, -4);
         const raw = await shapefileParts({ shp: bytes, dbf: entries.get(stem + ".dbf"), prj: entries.get(stem + ".prj"), cpg: entries.get(stem + ".cpg") });
-        layers.push({ name: label, geojson: validateFeatureCollection(raw), warnings: entries.has(stem + ".prj") ? [] : ["No .prj file: coordinates were assumed to be WGS84."] });
+        counted({ name: label, geojson: validateFeatureCollection(raw), warnings: entries.has(stem + ".prj") ? [] : ["No .prj file: coordinates were assumed to be WGS84."] });
       } else if (/\.(geojson|json)$/.test(filename)) {
-        layers.push(withNotes(label, jsonToGeoJSON(decodeText(bytes))));
+        counted(withNotes(label, jsonToGeoJSON(decodeText(bytes))));
       } else if (filename.endsWith(".csv")) {
-        layers.push(withNotes(label, csvToGeoJSON(decodeText(bytes))));
+        counted(withNotes(label, csvToGeoJSON(decodeText(bytes))));
       }
     }
     if (!layers.length) throw new Error("ZIP contains no shapefile, GeoJSON or CSV layers.");
@@ -615,7 +657,6 @@
   // files are read too.
 
   const PROFILE_VERSION = 1;
-  const MAX_PROFILE_DATASETS = 50;
 
   function isProfile(data) {
     return !!data && typeof data === "object" && !Array.isArray(data) && (data.omamap === "profile" || data.__sdv_profile === true);
@@ -657,7 +698,7 @@
     const wimp = data.__sdv_profile === true;
     if (!wimp && data.version !== PROFILE_VERSION) throw new Error("This profile was saved by a newer OmaMap (format " + String(data.version).slice(0, 10) + ").");
     if (!Array.isArray(data.datasets)) throw new Error("Profile has no dataset list.");
-    if (data.datasets.length > MAX_PROFILE_DATASETS) throw new Error("Profile has more than " + MAX_PROFILE_DATASETS + " datasets.");
+    if (data.datasets.length > LIMITS.layersPerFile) throw new Error("Profile has more than " + LIMITS.layersPerFile + " datasets.");
     const skipped = [];
     const datasets = [];
     data.datasets.forEach(function (ds, i) {
