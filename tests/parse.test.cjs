@@ -218,3 +218,56 @@ test("loose shapefile parts parse as a set", async () => {
   assert.ok(ds.geojson.features.length >= 1);
   assert.deepEqual(ds.warnings, []);
 });
+
+/* ------------------------------ Profiles ------------------------------- */
+const profileOf = (over) => JSON.stringify(Object.assign({
+  omamap: "profile", version: 1, savedAt: "2026-10-01T12:00:00Z",
+  view: { lat: 55.9, lng: -3.2, zoom: 11 }, basemap: "satellite",
+  datasets: [{ name: "Sites", visible: false, slot: 3, style: { colour: "#AABBCC", fillOpacity: 0.5, weight: 3, radius: 7, outline: "fg", byField: { field: "status", mode: "categories", reverse: true } },
+    geojson: JSON.parse(POINT_FC) }]
+}, over));
+
+test("an OmaMap profile parses with view, basemap and styles", async () => {
+  const p = await P.parseBytes("work.omamap", bytes(profileOf({})));
+  assert.equal(p.kind, "profile");
+  assert.deepEqual(p.view, { lat: 55.9, lng: -3.2, zoom: 11 });
+  assert.equal(p.basemap, "satellite");
+  const ds = p.datasets[0];
+  assert.equal(ds.name, "Sites");
+  assert.equal(ds.visible, false);
+  assert.deepEqual(ds.style, { colour: "#aabbcc", fillOpacity: 0.5, weight: 3, radius: 7, outline: "fg", byField: { field: "status", mode: "categories", reverse: true } });
+  assert.equal(ds.geojson.features[0].properties.name, "Edinburgh");
+});
+
+test("profile style values are cleaned, and unsafe fields dropped", async () => {
+  const p = await P.parseBytes("x.omamap", bytes(profileOf({ datasets: [{ name: "A\u0007", style: { colour: "red;}", fillOpacity: 9, weight: -4, outline: "javascript", byField: { field: "__proto__" } }, geojson: JSON.parse(POINT_FC) }] })));
+  const st = p.datasets[0].style;
+  assert.equal(p.datasets[0].name, "A ");
+  assert.equal(st.colour, null);
+  assert.equal(st.fillOpacity, 1);
+  assert.equal(st.weight, 0.5);
+  assert.equal(st.outline, "auto");
+  assert.equal(st.byField, null);
+});
+
+test("profiles with bad data or from a newer version are rejected", async () => {
+  await assert.rejects(P.parseBytes("x.omamap", bytes(profileOf({ version: 99 }))), /newer OmaMap/);
+  await assert.rejects(P.parseBytes("x.omamap", bytes(profileOf({ datasets: [{ name: "Bad", geojson: { type: "Point", coordinates: [500, 500] } }] }))), /Bad.*WGS84/);
+  await assert.rejects(P.parseBytes("x.omamap", bytes('{"type":"FeatureCollection","features":[]}')), /not an OmaMap profile/);
+});
+
+test("WIMP .sdv-profile.json files open as profiles", async () => {
+  const wimp = { __sdv_profile: true, version: 1, map: { center: [56.1, -3.9], zoom: 9, basemap: "osm" },
+    datasets: [
+      { name: "Assets", kind: "vector", visible: true, style: { color: "#1f6feb", fillColor: "#16a34a", fillOpacity: 0.4, weight: 2, radius: 7 },
+        styleByField: { field: "status", mode: "completion" }, geojson: JSON.parse(POINT_FC) },
+      { name: "Service map", kind: "arcgis-map", visible: false, sourceRef: { url: "https://example.test" } }
+    ] };
+  const p = await P.parseBytes("team.sdv-profile.json", bytes(JSON.stringify(wimp)));
+  assert.equal(p.kind, "profile");
+  assert.deepEqual(p.view, { lat: 56.1, lng: -3.9, zoom: 9 });
+  assert.equal(p.datasets.length, 1);
+  assert.equal(p.datasets[0].style.colour, "#16a34a");
+  assert.deepEqual(p.datasets[0].style.byField, { field: "status", mode: "categories", reverse: false });
+  assert.match(p.notes[0], /Service map/);
+});

@@ -89,6 +89,7 @@ kbd {
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 12px; border-bottom: 1px solid var(--line);
 }
+.head-actions { display: flex; gap: 6px; }
 h2 { margin: 0; font-size: 0.85em; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg-dim); font-weight: 600; }
 .layer-list { overflow-y: auto; flex: 0 1 auto; }
 .layer {

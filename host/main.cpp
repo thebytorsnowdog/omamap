@@ -22,9 +22,12 @@ static QString coreDirectory()
 {
     const QString override = qEnvironmentVariable("OMAMAP_CORE_DIR");
     if (!override.isEmpty()) return override;
-    // Next to the binary (relocatable installs), then the configured prefix,
-    // then the source tree for development builds.
+    // A binary running from its build directory uses this checkout's core;
+    // installed binaries look next to themselves (relocatable installs), then
+    // in the configured prefix.
     const QString appDir = QCoreApplication::applicationDirPath();
+    if (QDir(appDir) == QDir(QStringLiteral(OMAMAP_BUILD_DIR)) && QFileInfo::exists(QStringLiteral(OMAMAP_SOURCE_CORE "/index.html")))
+        return QDir(QStringLiteral(OMAMAP_SOURCE_CORE)).canonicalPath();
     for (const QString &candidate : {appDir + QStringLiteral("/../share/omamap/core"),
                                      QStringLiteral(OMAMAP_INSTALLED_CORE),
                                      QStringLiteral(OMAMAP_SOURCE_CORE)}) {

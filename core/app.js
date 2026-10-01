@@ -419,6 +419,7 @@ function renderLayerList() {
   el("layer-empty").hidden = n > 0;
   el("btn-clear-all").disabled = !n;
   el("btn-fit-all").disabled = !n;
+  el("btn-save").disabled = !n;
   el("meta-layers").textContent = n;
   el("meta-features").textContent = STATE.datasets.reduce(function (a, d) { return a + d.featureCount; }, 0).toLocaleString();
 }
@@ -821,11 +822,20 @@ async function handleFiles(fileList) {
   });
 
   const added = [];
+  let profileOpened = null;
   for (let i = 0; i < jobs.length; i++) {
     setLoading(true, "Reading " + jobs[i].label + (jobs.length > 1 ? " (" + (i + 1) + "/" + jobs.length + ")" : "") + "…");
     try {
-      const datasets = await jobs[i].run();
-      datasets.forEach(function (parsed) { added.push(addDataset(parsed)); });
+      const result = await jobs[i].run();
+      if (result && result.kind === "profile") {
+        setLoading(false);
+        if (STATE.datasets.length && !window.confirm("Open profile “" + jobs[i].label + "”?\n\nIt replaces the " + plural(STATE.datasets.length, "dataset") + " currently open.")) continue;
+        restoreProfile(result);
+        profileOpened = jobs[i].label;
+        added.length = 0;
+        continue;
+      }
+      result.forEach(function (parsed) { added.push(addDataset(parsed)); });
     } catch (error) {
       toast("Could not load " + jobs[i].label, OmaParse.safeMessage(error, "The file was rejected."), "err");
     }
@@ -833,6 +843,10 @@ async function handleFiles(fileList) {
   setLoading(false);
   renderLayerList();
   Table.onDatasetsChanged();
+  if (profileOpened) {
+    setStatus("Opened profile " + profileOpened + " (" + plural(STATE.datasets.length, "dataset") + ").");
+    toast("Profile opened", profileOpened + " · " + plural(STATE.datasets.length, "dataset"), "ok");
+  }
   if (added.length) {
     const bounds = L.latLngBounds([]);
     added.forEach(function (ds) { bounds.extend(ds.layer.getBounds()); });
@@ -840,6 +854,88 @@ async function handleFiles(fileList) {
     const features = added.reduce(function (a, d) { return a + d.featureCount; }, 0);
     setStatus("Added " + plural(added.length, "dataset") + " (" + plural(features, "feature") + ").");
   }
+}
+
+/* ------------------------------- Profiles -------------------------------- */
+/* A profile saves the workspace: every dataset with its data, style,
+   visibility and stacking order, plus the map view and basemap. */
+
+function buildProfile() {
+  const c = STATE.map.getCenter();
+  return {
+    omamap: "profile",
+    version: OmaParse.PROFILE_VERSION,
+    app: window.OmaMap.version,
+    savedAt: new Date().toISOString(),
+    view: { lat: c.lat, lng: c.lng, zoom: STATE.map.getZoom() },
+    basemap: STATE.basemapPref,
+    datasets: STATE.datasets.map(function (ds) {
+      const st = ds.style, bf = st.byField;
+      return {
+        name: ds.name,
+        visible: ds.visible,
+        slot: ds.slot,
+        style: {
+          colour: st.colour, fillOpacity: st.fillOpacity, weight: st.weight, radius: st.radius, outline: st.outline,
+          byField: bf ? { field: bf.field, mode: bf.mode, reverse: bf.reverse } : null
+        },
+        geojson: { type: "FeatureCollection", features: ds.features }
+      };
+    })
+  };
+}
+
+function profileFileName() {
+  const d = new Date();
+  const pad = function (n) { return String(n).padStart(2, "0"); };
+  return "OmaMap " + d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + pad(d.getMinutes()) + ".omamap";
+}
+
+function saveProfile() {
+  if (!STATE.datasets.length) { toast("Nothing to save", "Open some datasets first.", "warn"); return; }
+  let blob;
+  try { blob = new Blob([JSON.stringify(buildProfile())], { type: "application/x-omamap-profile" }); }
+  catch (e) { toast("Could not save", OmaParse.safeMessage(e), "err"); return; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = profileFileName();
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 60000);
+  // The desktop app asks where to save and reports back via profileSaved().
+  if (!STATE.host) toast("Profile saved", a.download + " (" + plural(STATE.datasets.length, "dataset") + ")", "ok");
+}
+
+function restoreProfile(profile) {
+  clearSelection();
+  STATE.datasets.slice().forEach(function (ds) { STATE.map.removeLayer(ds.layer); });
+  STATE.datasets = [];
+  STATE.nextSlot = 0;
+  STATE.styleOpenId = null;
+  const added = [];
+  profile.datasets.forEach(function (saved) {
+    const ds = addDataset({ name: saved.name, geojson: saved.geojson, warnings: saved.warnings });
+    if (Number.isInteger(saved.slot) && saved.slot >= 0) ds.slot = saved.slot;
+    const st = saved.style || {};
+    ["colour", "fillOpacity", "weight", "radius", "outline"].forEach(function (k) { if (st[k] !== null && st[k] !== undefined) ds.style[k] = st[k]; });
+    if (st.byField && datasetFields(ds).indexOf(st.byField.field) >= 0) {
+      const mode = st.byField.mode === "ranges" && fieldIsNumeric(ds, st.byField.field) ? "ranges" : "categories";
+      setColourBy(ds, st.byField.field, mode, st.byField.reverse);
+    }
+    applyDatasetStyle(ds);
+    if (saved.visible === false) { ds.visible = false; STATE.map.removeLayer(ds.layer); }
+    added.push(ds);
+  });
+  STATE.nextSlot = STATE.datasets.reduce(function (m, d) { return Math.max(m, d.slot + 1); }, 0);
+  if (profile.basemap && (profile.basemap === "auto" || OMAMAP_BASEMAPS.some(function (b) { return b.id === profile.basemap; }))) setBasemap(profile.basemap, true);
+  if (profile.view) STATE.map.setView([profile.view.lat, profile.view.lng], profile.view.zoom);
+  else fitAll();
+  renderLayerList();
+  renderLegend();
+  Table.onDatasetsChanged();
+  (profile.notes || []).forEach(function (n) { toast("Profile note", n, "warn"); });
+  return added;
 }
 
 /* ------------------------------ Host bridge ------------------------------ */
@@ -863,7 +959,15 @@ function openUrls(list) {
   return handleFiles(files);
 }
 
-window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, version: "0.2.0" };
+// Called by the desktop app when it starts and after it saves a profile.
+function setHost(info) { STATE.host = info && typeof info === "object" ? info : { present: true }; }
+function profileSaved(path) {
+  const name = String(path || "").split("/").pop();
+  toast("Profile saved", name, "ok");
+  setStatus("Saved profile to " + String(path || "").slice(0, 300) + ".");
+}
+
+window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, setHost: setHost, profileSaved: profileSaved, version: "0.3.0" };
 
 /* -------------------------------- Wiring --------------------------------- */
 function wireDragDrop() {
@@ -892,6 +996,7 @@ function wireKeys() {
     }
     if (isTyping(e) || e.ctrlKey || e.altKey || e.metaKey) {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") { e.preventDefault(); el("file-input").click(); }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveProfile(); }
       return;
     }
     const k = e.key;
@@ -952,6 +1057,7 @@ function boot() {
   wireKeys();
   Table.wire();
   el("btn-open").addEventListener("click", function () { el("file-input").click(); });
+  el("btn-save").addEventListener("click", saveProfile);
   el("layer-empty").addEventListener("click", function () { el("file-input").click(); });
   el("file-input").addEventListener("change", function () { const files = Array.from(this.files || []); this.value = ""; handleFiles(files); });
   el("btn-fit-all").addEventListener("click", fitAll);

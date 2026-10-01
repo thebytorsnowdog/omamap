@@ -4,6 +4,7 @@
 #include <QWebEnginePage>
 #include <QWebEngineView>
 
+class QWebEngineDownloadRequest;
 class SchemeHandler;
 class ThemeWatcher;
 
@@ -16,6 +17,7 @@ public:
 
 protected:
     bool acceptNavigationRequest(const QUrl &url, NavigationType type, bool isMainFrame) override;
+    QStringList chooseFiles(FileSelectionMode mode, const QStringList &oldFiles, const QStringList &acceptedMimeTypes) override;
     void javaScriptConsoleMessage(JavaScriptConsoleMessageLevel level, const QString &message,
                                   int line, const QString &source) override;
 };
@@ -33,6 +35,7 @@ private:
     void pushTheme();
     void flush();
     void selfTest();
+    void saveDownload(QWebEngineDownloadRequest *download);
 
     SchemeHandler *m_scheme;
     ThemeWatcher *m_theme;

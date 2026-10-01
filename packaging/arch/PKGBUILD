@@ -1,7 +1,7 @@
 # Builds OmaMap from this checkout:  cd packaging/arch && makepkg -si
 # For the AUR, replace the local source with the published git repository.
 pkgname=omamap
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="View GeoJSON, KML, GPX, CSV and shapefiles over street and satellite maps"
 arch=(x86_64 aarch64)

@@ -276,10 +276,14 @@
     return geom(data);
   }
 
-  function jsonToGeoJSON(text) {
-    let data;
-    try { data = JSON.parse(text); }
+  function parseJson(text) {
+    try { return JSON.parse(text); }
     catch (e) { throw new Error("File is not valid JSON."); }
+  }
+
+  function jsonToGeoJSON(text) { return geoJsonFromData(parseJson(text)); }
+
+  function geoJsonFromData(data) {
     if (!data || typeof data !== "object") throw new Error("JSON did not contain an object.");
     if (declaresBng(data)) {
       const fc = validateFeatureCollection(reprojectGeoJsonBng(data));
@@ -574,6 +578,85 @@
     return layers;
   }
 
+  /* ------------------------------ Profiles -------------------------------- */
+  // A profile is a saved workspace: datasets with their data and styles, the
+  // map view and the basemap. OmaMap writes .omamap; WIMP's .sdv-profile.json
+  // files are read too.
+
+  const PROFILE_VERSION = 1;
+  const MAX_PROFILE_DATASETS = 50;
+
+  function isProfile(data) {
+    return !!data && typeof data === "object" && !Array.isArray(data) && (data.omamap === "profile" || data.__sdv_profile === true);
+  }
+
+  function cleanHex(v) { return typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : null; }
+  function cleanNum(v, lo, hi, fallback) { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback; }
+  function cleanText(v, max) { return typeof v === "string" ? v.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, max) : ""; }
+
+  function cleanStyle(raw) {
+    const st = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const out = {
+      colour: cleanHex(st.colour),
+      fillOpacity: cleanNum(st.fillOpacity, 0, 1, null),
+      weight: cleanNum(st.weight, 0.5, 8, null),
+      radius: cleanNum(st.radius, 2, 16, null),
+      outline: ["auto", "fg", "bg", "none"].indexOf(st.outline) >= 0 ? st.outline : "auto",
+      byField: null
+    };
+    const bf = st.byField;
+    if (bf && typeof bf === "object" && typeof bf.field === "string" && bf.field && FORBIDDEN_PROPERTY_NAMES.indexOf(bf.field) < 0) {
+      out.byField = { field: bf.field.slice(0, 200), mode: bf.mode === "ranges" ? "ranges" : "categories", reverse: bf.reverse === true };
+    }
+    return out;
+  }
+
+  // WIMP stored Leaflet-style options and a separate style-by-field record.
+  function wimpStyle(ds) {
+    const st = ds.style && typeof ds.style === "object" ? ds.style : {};
+    const sbf = ds.styleByField && typeof ds.styleByField === "object" ? ds.styleByField : null;
+    return cleanStyle({
+      colour: cleanHex(st.fillColor) || cleanHex(st.color),
+      fillOpacity: st.fillOpacity, weight: st.weight, radius: st.radius,
+      byField: sbf && sbf.field ? { field: sbf.field, mode: "categories" } : null
+    });
+  }
+
+  function parseProfile(data) {
+    const wimp = data.__sdv_profile === true;
+    if (!wimp && data.version !== PROFILE_VERSION) throw new Error("This profile was saved by a newer OmaMap (format " + String(data.version).slice(0, 10) + ").");
+    if (!Array.isArray(data.datasets)) throw new Error("Profile has no dataset list.");
+    if (data.datasets.length > MAX_PROFILE_DATASETS) throw new Error("Profile has more than " + MAX_PROFILE_DATASETS + " datasets.");
+    const skipped = [];
+    const datasets = [];
+    data.datasets.forEach(function (ds, i) {
+      if (!ds || typeof ds !== "object") throw new Error("Profile dataset " + (i + 1) + " is invalid.");
+      const name = cleanText(ds.name, 200) || "Dataset " + (i + 1);
+      // WIMP saved server-rendered map services without data; nothing to restore.
+      if (wimp && ds.kind && ds.kind !== "vector") { skipped.push(name); return; }
+      let geojson;
+      try { geojson = validateFeatureCollection(ds.geojson); }
+      catch (e) { throw new Error("Profile dataset “" + name + "”: " + safeMessage(e)); }
+      datasets.push({ name: name, geojson: geojson, visible: ds.visible !== false, style: wimp ? wimpStyle(ds) : cleanStyle(ds.style), warnings: [] });
+    });
+    let view = null;
+    const v = wimp ? (data.map && Array.isArray(data.map.center) ? { lat: data.map.center[0], lng: data.map.center[1], zoom: data.map.zoom } : null) : data.view;
+    if (v && Number.isFinite(Number(v.lat)) && Number.isFinite(Number(v.lng)) && Number.isFinite(Number(v.zoom))) {
+      view = { lat: cleanNum(v.lat, -85, 85, 0), lng: cleanNum(v.lng, -180, 180, 0), zoom: cleanNum(v.zoom, 2, 22, 6) };
+    }
+    const basemapRaw = wimp ? (data.map && data.map.basemap) : data.basemap;
+    const basemap = typeof basemapRaw === "string" && /^[a-z]{1,20}$/.test(basemapRaw) ? basemapRaw : null;
+    return {
+      kind: "profile",
+      name: cleanText(data.name, 200),
+      savedAt: cleanText(data.savedAt, 40),
+      view: view,
+      basemap: basemap,
+      datasets: datasets,
+      notes: skipped.length ? ["Not restored (map services have no saved data): " + skipped.join(", ")] : []
+    };
+  }
+
   /* ----------------------------- Dispatch -------------------------------- */
 
   // Conversion notes travel with the dataset and show in the dataset list.
@@ -592,7 +675,12 @@
     if (buffer.byteLength > LIMITS.fileBytes) throw new Error("File is too large (limit " + Math.round(LIMITS.fileBytes / 1048576) + " MiB).");
     const text = decodeText(new Uint8Array(buffer));
     if (ext === "csv" || ext === "tsv" || ext === "txt") return [withNotes(display, csvToGeoJSON(text))];
-    if (ext === "geojson" || ext === "json") return [withNotes(display, jsonToGeoJSON(text))];
+    if (ext === "omamap" || ext === "json" || ext === "geojson") {
+      const data = parseJson(text);
+      if (isProfile(data)) return parseProfile(data);
+      if (ext === "omamap") throw new Error("This is not an OmaMap profile.");
+      return [withNotes(display, geoJsonFromData(data))];
+    }
     if (ext === "kml" || ext === "gpx") return [{ name: display, geojson: xmlToGeoJSON(text, ext) }];
     // Unknown extension: try JSON, then CSV.
     try { return [withNotes(display, jsonToGeoJSON(text))]; }
@@ -623,6 +711,7 @@
     xmlToGeoJSON: xmlToGeoJSON,
     inspectZipMetadata: inspectZipMetadata,
     bngToWgs84: bngToWgs84,
+    PROFILE_VERSION: PROFILE_VERSION,
     extractZip: extractZip,
     parseBytes: parseBytes,
     parseShapefileSet: parseShapefileSet

@@ -22,15 +22,18 @@
     <aside class="sidebar" aria-label="Datasets">
       <div class="section-head">
         <h2>Datasets</h2>
-        <button type="button" class="btn" id="btn-open" title="Open files (O)">+ Open</button>
+        <span class="head-actions">
+          <button type="button" class="btn" id="btn-save" title="Save profile: datasets, styles and view (Ctrl+S)" disabled>Save</button>
+          <button type="button" class="btn" id="btn-open" title="Open data files or a profile (O)">+ Open</button>
+        </span>
       </div>
       <input id="file-input" class="sr-only" type="file" multiple
-             accept=".geojson,.json,.kml,.gpx,.zip,.csv,.tsv,.txt,.shp,.dbf,.prj,.cpg" aria-label="Choose data files">
+             accept=".geojson,.json,.kml,.gpx,.zip,.csv,.tsv,.txt,.shp,.dbf,.prj,.cpg,.omamap" aria-label="Choose data files">
       <div id="layer-list" class="layer-list"></div>
       <button type="button" class="empty" id="layer-empty">
         <span class="empty-title">No datasets yet</span>
         <span>Drop files anywhere, or press <kbd>O</kbd></span>
-        <span class="formats">GeoJSON · KML · GPX · CSV · Shapefile (.zip or .shp set)</span>
+        <span class="formats">GeoJSON · KML · GPX · CSV · Shapefile (.zip or .shp set) · OmaMap profile</span>
       </button>
       <div class="sidebar-foot">
         <button type="button" class="btn subtle" id="btn-fit-all" disabled title="Fit all datasets (F)">Fit all</button>
@@ -89,7 +92,7 @@
     <span id="status-text">Ready.</span>
     <span class="spacer"></span>
     <span class="coords" id="coords"></span>
-    <span class="keys"><kbd>O</kbd> open <kbd>B</kbd> basemap <kbd>F</kbd> fit <kbd>Z</kbd> zoom <kbd>T</kbd> table <kbd>L</kbd> legend <kbd>Esc</kbd> clear</span>
+    <span class="keys"><kbd>O</kbd> open <kbd>Ctrl+S</kbd> save <kbd>B</kbd> basemap <kbd>F</kbd> fit <kbd>Z</kbd> zoom <kbd>T</kbd> table <kbd>L</kbd> legend <kbd>Esc</kbd> clear</span>
   </footer>
 </div>
 <div class="toasts" id="toasts" aria-live="polite"></div>

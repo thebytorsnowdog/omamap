@@ -58,7 +58,7 @@ function fixtures(dir) {
   const results = [];
   const check = async (name, fn) => {
     try { await fn(); results.push("✔ " + name); }
-    catch (e) { results.push("✖ " + name + "\n    " + e.message.split("\n").filter(Boolean).slice(0, 4).join(" ")); process.exitCode = 1; }
+    catch (e) { results.push("✖ " + name + "\n    " + e.message.split("\n").filter(Boolean).slice(0, 14).join(" ")); process.exitCode = 1; }
   };
   const leafStyle = (dsName, index) => page.evaluate(([n, i]) => {
     const ds = STATE.datasets.find((d) => d.name === n);
@@ -258,6 +258,57 @@ function fixtures(dir) {
     assert.match(await page.locator("#tp-dataset option:checked").textContent(), /^assets/);
     await page.keyboard.press("t");
     assert.equal(await page.locator("#table-panel").isHidden(), true);
+  });
+
+  await check("a saved profile reopens with data, styles, visibility, view and basemap", async () => {
+    await page.evaluate(() => clearAll());
+    await page.setInputFiles("#file-input", [path.join(OUT, "fixtures-features", "assets.geojson"), path.join(OUT, "fixtures-features", "sites.geojson")]);
+    await page.waitForFunction(() => STATE.datasets.length === 2 && document.getElementById("loading").hidden);
+    const before = await page.evaluate(() => {
+      const assets = STATE.datasets.find((d) => d.name === "assets"), sites = STATE.datasets.find((d) => d.name === "sites");
+      setColourBy(assets, "condition_grade", "categories", true);
+      applyDatasetStyle(assets);
+      sites.style.colour = "#123456"; sites.style.outline = "fg"; sites.style.fillOpacity = 0.6;
+      applyDatasetStyle(sites);
+      toggleVisible(sites.id);
+      setBasemap("topo", true);
+      return { order: STATE.datasets.map((d) => d.name), colours: assets.layers.slice(0, 5).map((l) => l.options.fillColor) };
+    });
+    await setView(55.95, -3.9, 12);
+    const [download] = await Promise.all([page.waitForEvent("download"), page.keyboard.press("Control+s")]);
+    assert.match(download.suggestedFilename(), /^OmaMap \d{4}-\d{2}-\d{2} \d{4}\.omamap$/);
+    const saved = path.join(OUT, "roundtrip.omamap");
+    await download.saveAs(saved);
+
+    await page.evaluate(() => { clearAll(); setBasemap("streets", true); STATE.map.setView([50, 0], 5, { animate: false }); });
+    await page.setInputFiles("#file-input", saved);
+    await page.waitForFunction(() => STATE.datasets.length === 2 && document.getElementById("loading").hidden);
+    const after = await page.evaluate(() => {
+      const assets = STATE.datasets.find((d) => d.name === "assets"), sites = STATE.datasets.find((d) => d.name === "sites");
+      const c = STATE.map.getCenter();
+      return {
+        order: STATE.datasets.map((d) => d.name), colours: assets.layers.slice(0, 5).map((l) => l.options.fillColor),
+        byField: { field: assets.style.byField.field, mode: assets.style.byField.mode, reverse: assets.style.byField.reverse },
+        sites: { visible: sites.visible, colour: sites.style.colour, outline: sites.style.outline, fillOpacity: sites.style.fillOpacity },
+        view: [Math.round(c.lat * 100) / 100, Math.round(c.lng * 100) / 100, STATE.map.getZoom()], basemap: STATE.basemapId
+      };
+    });
+    assert.deepEqual(after.order, before.order);
+    assert.deepEqual(after.colours, before.colours);
+    assert.deepEqual(after.byField, { field: "condition_grade", mode: "categories", reverse: true });
+    assert.deepEqual(after.sites, { visible: false, colour: "#123456", outline: "fg", fillOpacity: 0.6 });
+    assert.deepEqual(after.view, [55.95, -3.9, 12]);
+    assert.equal(after.basemap, "topo");
+  });
+
+  await check("opening a profile over open datasets asks first", async () => {
+    let asked = null;
+    page.once("dialog", (d) => { asked = d.message(); d.dismiss(); });
+    await page.setInputFiles("#file-input", path.join(OUT, "roundtrip.omamap"));
+    await page.waitForFunction(() => document.getElementById("loading").hidden);
+    await page.waitForTimeout(200);
+    assert.match(asked || "", /replaces the 2 datasets/);
+    assert.equal(await page.evaluate(() => STATE.datasets.length), 2);
   });
 
   // Draw a row of points with each renderer and check the pixels land where

@@ -1,5 +1,6 @@
 #include "window.h"
 
+#include "recent.h"
 #include "scheme.h"
 #include "theme.h"
 
@@ -7,11 +8,18 @@
 #include <QColor>
 #include <QTimer>
 #include <QDesktopServices>
+#include <QDir>
+#include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QWebEngineDownloadRequest>
 #include <QWebEngineNewWindowRequest>
+#include <QWebEngineProfile>
 #include <QWebEngineSettings>
 
 static bool isWebLink(const QUrl &url)
@@ -34,6 +42,15 @@ bool Page::acceptNavigationRequest(const QUrl &url, NavigationType type, bool is
     if (isMainFrame && type == NavigationTypeLinkClicked && isWebLink(url)) QDesktopServices::openUrl(url);
     // Anything else (a file dropped outside the drop handler, stray links) stays out.
     return false;
+}
+
+// The page's file picker: the default Qt dialog, with chosen files remembered
+// for the recent list.
+QStringList Page::chooseFiles(FileSelectionMode mode, const QStringList &oldFiles, const QStringList &acceptedMimeTypes)
+{
+    const QStringList chosen = QWebEnginePage::chooseFiles(mode, oldFiles, acceptedMimeTypes);
+    for (const QString &path : chosen) Recent::add(path);
+    return chosen;
 }
 
 void Page::javaScriptConsoleMessage(JavaScriptConsoleMessageLevel level, const QString &message,
@@ -64,10 +81,16 @@ Window::Window(QWebEngineProfile *profile, SchemeHandler *scheme, ThemeWatcher *
     connect(page, &QWebEnginePage::loadFinished, this, [this](bool ok) {
         if (!ok) return;
         m_ready = true;
+        this->page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.setHost({ version: \"" OMAMAP_VERSION "\" });"));
         pushTheme();
         flush();
-        if (qEnvironmentVariableIsSet("OMAMAP_SELFTEST")) QTimer::singleShot(qEnvironmentVariableIntValue("OMAMAP_SELFTEST_DELAY") ?: 4000, this, &Window::selfTest);
+        if (qEnvironmentVariableIsSet("OMAMAP_SELFTEST")) {
+            const QString script = qEnvironmentVariable("OMAMAP_SELFTEST_JS");
+            if (!script.isEmpty()) QTimer::singleShot(2500, this, [this, script] { this->page()->runJavaScript(script); });
+            QTimer::singleShot(qEnvironmentVariableIntValue("OMAMAP_SELFTEST_DELAY") ?: 4000, this, &Window::selfTest);
+        }
     });
+    connect(profile, &QWebEngineProfile::downloadRequested, this, &Window::saveDownload);
     connect(theme, &ThemeWatcher::changed, this, [this, page] {
         page->setBackgroundColor(QColor(m_theme->background()));
         pushTheme();
@@ -80,6 +103,49 @@ void Window::pushTheme()
     if (!m_ready) return;
     const QString json = QString::fromUtf8(QJsonDocument(m_theme->current()).toJson(QJsonDocument::Compact));
     page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.applyTheme(%1);").arg(json));
+}
+
+// The page saves profiles as blob downloads; ask where to put them. Nothing
+// else may download.
+void Window::saveDownload(QWebEngineDownloadRequest *download)
+{
+    if (qEnvironmentVariableIsSet("OMAMAP_DEBUG"))
+        qWarning().noquote() << "[download]" << download->url().toString() << "page match" << (download->page() == page()) << download->suggestedFileName();
+    if (download->page() != page() || download->url().scheme() != QLatin1String("blob")) {
+        download->cancel();
+        return;
+    }
+    QSettings settings;
+    QString dir = settings.value(QStringLiteral("profiles/lastDir")).toString();
+    if (dir.isEmpty() || !QFileInfo(dir).isDir()) dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    if (dir.isEmpty() || !QFileInfo(dir).isDir()) dir = QDir::homePath();
+
+    QString target = qEnvironmentVariable("OMAMAP_SAVE_PATH");   // tests: no dialog
+    if (target.isEmpty()) {
+        target = QFileDialog::getSaveFileName(this, QStringLiteral("Save OmaMap profile"),
+            QDir(dir).filePath(download->suggestedFileName()), QStringLiteral("OmaMap profile (*.omamap)"));
+    }
+    if (target.isEmpty()) { download->cancel(); return; }
+    if (!target.endsWith(QLatin1String(".omamap"), Qt::CaseInsensitive)) target += QLatin1String(".omamap");
+    const QFileInfo info(target);
+    settings.setValue(QStringLiteral("profiles/lastDir"), info.absolutePath());
+    // The dialog has already confirmed replacing an existing file.
+    if (info.exists()) QFile::remove(info.absoluteFilePath());
+
+    download->setDownloadDirectory(info.absolutePath());
+    download->setDownloadFileName(info.fileName());
+    const QString path = info.absoluteFilePath();
+    connect(download, &QWebEngineDownloadRequest::isFinishedChanged, this, [this, download, path] {
+        if (!download->isFinished()) return;
+        if (download->state() == QWebEngineDownloadRequest::DownloadCompleted) {
+            Recent::add(path);
+            const QString arg = QString::fromUtf8(QJsonDocument(QJsonArray{path}).toJson(QJsonDocument::Compact));
+            page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.profileSaved(%1[0]);").arg(arg));
+        } else {
+            page()->runJavaScript(QStringLiteral("toast('Could not save the profile', 'The file could not be written.', 'err');"));
+        }
+    });
+    download->accept();
 }
 
 void Window::openFiles(const QStringList &paths)
@@ -95,6 +161,7 @@ void Window::flush()
     for (const QString &path : std::as_const(m_pending)) {
         const QFileInfo info(path);
         if (!info.isFile() || !info.isReadable()) continue;
+        Recent::add(info.absoluteFilePath());
         list.append(QJsonObject{
             {"url", m_scheme->shareFile(info.absoluteFilePath())},
             {"name", info.fileName()},
