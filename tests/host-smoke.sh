@@ -9,10 +9,9 @@ bin=${1:-build/omamap}
 fix=tests/output/fixtures
 [[ -f $fix/park.geojson ]] || { echo "Run tests/browser.cjs first to write fixtures." >&2; exit 2; }
 
-export QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu
-# Chromium and Qt have separate rendering backends. The headless CI container
-# has no OpenGL context, so Qt's scene graph must also use software rendering.
-export QT_QUICK_BACKEND=software
+# CI uses xcb under Xvfb: WebEngine's widget compositor needs an OpenGL
+# context even when Chromium GPU acceleration is disabled.
+export QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-offscreen} QT_FORCE_STDERR_LOGGING=1 QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu
 # Throwaway browser profile, recent list and settings.
 export XDG_DATA_HOME=$(mktemp -d) XDG_CACHE_HOME=$(mktemp -d) XDG_STATE_HOME=$(mktemp -d) XDG_CONFIG_HOME=$(mktemp -d)
 export OMAMAP_INSTANCE=smoke-$$   # never talk to the user's running OmaMap
@@ -78,13 +77,21 @@ fi
 
 # Kill the page's renderer process: the app must reload the page and say so.
 log=$(mktemp)
-OMAMAP_SELFTEST=1 OMAMAP_SELFTEST_DELAY=9000 timeout -k 5 60 "$bin" --new-window $fix/park.geojson > "$log" 2>> "$hostlog" &
+crashlog=$(mktemp)
+OMAMAP_SELFTEST=1 OMAMAP_SELFTEST_DELAY=4000 timeout -k 5 60 "$bin" --new-window $fix/park.geojson > "$log" 2> "$crashlog" &
 app=$!
-sleep 4
+# Kill only after the page has loaded, and inspect the recovered page before
+# its five-second notification expires. Fixed sleeps raced both events.
+for ((attempt=0; attempt<200; attempt++)); do
+  grep -q '^OMAMAP_SELFTEST_READY$' "$crashlog" && break
+  kill -0 "$app" 2>/dev/null || break
+  sleep 0.1
+done
 descendants() { local p; for p in $(pgrep -P "$1"); do echo "$p"; descendants "$p"; done; }
 renderer=$(for p in $(descendants $app); do grep -qa -- '--type=renderer' /proc/$p/cmdline 2>> "$hostlog" && echo $p; done | head -1)
 [[ -n $renderer ]] && kill -9 "$renderer"
 wait $app || true
+cat "$crashlog" >> "$hostlog"; rm -f "$crashlog"
 out=$(tail -1 "$log"); rm -f "$log"
 if [[ -n $renderer && $out == *'OmaMap recovered'* ]]; then
   echo "✔ a crashed page reloads with a notice"

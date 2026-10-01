@@ -137,6 +137,8 @@ Window::Window(QWebEngineProfile *profile, SchemeHandler *scheme, ThemeWatcher *
         pushTheme();
         flush();
         if (qEnvironmentVariableIsSet("OMAMAP_SELFTEST")) {
+            fprintf(stderr, "OMAMAP_SELFTEST_READY\n");
+            fflush(stderr);
             const QString script = qEnvironmentVariable("OMAMAP_SELFTEST_JS");
             if (!script.isEmpty()) QTimer::singleShot(2500, this, [this, script] { this->page()->runJavaScript(script); });
             QTimer::singleShot(qEnvironmentVariableIntValue("OMAMAP_SELFTEST_DELAY") ?: 4000, this, &Window::selfTest);
