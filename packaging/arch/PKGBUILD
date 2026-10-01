@@ -10,7 +10,7 @@ pkgdesc="View GeoJSON, KML, GPX, CSV and shapefiles over street and satellite ma
 arch=(x86_64 aarch64)
 url="https://github.com/thebytorsnowdog/omamap"
 license=(MIT)
-depends=(qt6-base qt6-webengine hicolor-icon-theme)
+depends=('qt6-base>=6.8' 'qt6-webengine>=6.8' hicolor-icon-theme)
 makedepends=(cmake)
 checkdepends=(nodejs)
 
@@ -22,6 +22,7 @@ build() {
 }
 
 check() {
+  ctest --test-dir "$srcdir/build" --output-on-failure
   cd "$_src"
   # Bundled libraries must be the pinned releases.
   (cd core/vendor && sha256sum --check --quiet SHA256SUMS)

@@ -6,10 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 include(GNUInstallDirs)
 
-find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Widgets Network WebEngineCore WebEngineWidgets)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network WebEngineCore WebEngineWidgets)
 
 add_executable(omamap
   main.cpp
+  profile_save.cpp profile_save.h
   recent.cpp recent.h
   scheme.cpp scheme.h
   theme.cpp theme.h
@@ -24,6 +25,14 @@ target_compile_definitions(omamap PRIVATE
 )
 target_link_libraries(omamap PRIVATE
   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::WebEngineCore Qt6::WebEngineWidgets)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(profile-save-test ../tests/profile-save.cpp profile_save.cpp)
+  target_include_directories(profile-save-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(profile-save-test PRIVATE Qt6::Core)
+  add_test(NAME profile-save COMMAND profile-save-test)
+endif()
 
 install(TARGETS omamap RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY ../core/ DESTINATION ${CMAKE_INSTALL_DATADIR}/omamap/core)

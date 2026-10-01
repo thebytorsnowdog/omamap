@@ -23,6 +23,9 @@
     cells: 10000000,                    // attribute values built from one CSV or DBF
     propertyString: 100000,
     propertyBytes: 200 * 1024 * 1024,
+    workspaceBytes: 512 * 1024 * 1024,  // estimated data + rendering structures, not an OS memory guarantee
+    workspaceFeatures: 1000000,
+    workspaceCoordinates: 10000000,
     layersPerFile: 50,                  // datasets from one ZIP or profile
     featuresPerFile: 1000000,           // all layers of one ZIP together
     arrayNesting: 4                     // GeoJSON given as nested arrays of layers
@@ -152,6 +155,8 @@
      value to store (only Dates are replaced). Not copying keeps peak memory
      close to the parsed size, which matters for large files. */
   function checkJsonValue(value, depth, budget) {
+    budget.bytes += 16;
+    if (budget.bytes > LIMITS.propertyBytes) throw new Error("Dataset attribute data exceeds the size budget.");
     if (depth > 20) throw new Error("Nested property depth exceeds 20.");
     if (value === null || typeof value === "boolean") return value;
     if (typeof value === "number") {
@@ -173,6 +178,7 @@
       if (keys.length > LIMITS.propertiesPerFeature) throw new Error("An object has too many properties.");
       for (let i = 0; i < keys.length; i++) {
         const key = keys[i];
+        budget.bytes += key.length * 2 + 16;
         if (FORBIDDEN_PROPERTY_NAMES.indexOf(key) >= 0) throw new Error("Rejected unsafe property name: " + key);
         if (key.length > LIMITS.propertyString) throw new Error("A property name is too long.");
         const v = value[key];
@@ -231,7 +237,8 @@
     }
     if (budget.bytes > LIMITS.propertyBytes) throw new Error("Dataset attribute data exceeds the size budget.");
     if (!features.length) throw new Error("Dataset contains no features.");
-    return { type: "FeatureCollection", features: features, coordinateCount: counter.count };
+    return { type: "FeatureCollection", features: features, coordinateCount: counter.count, fields: Array.from(fields),
+      estimatedBytes: features.length * 256 + counter.count * 64 + budget.bytes };
   }
 
   /* ------------------------ British National Grid ------------------------ */
@@ -356,12 +363,50 @@
 
   function csvToGeoJSON(text) {
     if (!text || !text.trim()) throw new Error("CSV file is empty.");
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    // Detect the delimiter on a bounded sample, then scan without building
+    // arrays. Papa's chunk callbacks run AFTER a record has been allocated;
+    // a single comma-heavy record otherwise bypasses the memory safeguards.
+    const sample = root.Papa.parse(text.slice(0, 65536), { preview: 10, skipEmptyLines: "greedy" });
+    const delimiter = sample.meta.delimiter;
+    let quoted = false, atStart = true, width = 1, length = 0, rowCount = 0, cells = 0, nonempty = false;
+    function record() {
+      if (nonempty) {
+        if (rowCount++ > 0) cells += width;
+        if (rowCount > LIMITS.features + 1) throw new Error("CSV has more than " + LIMITS.features.toLocaleString() + " rows (the feature limit).");
+        if (cells > LIMITS.cells) throw new Error("CSV has more than " + LIMITS.cells.toLocaleString() + " cells (rows × columns).");
+      }
+      width = 1; length = 0; atStart = true; nonempty = false;
+    }
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (quoted) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') { i++; length++; }
+          else quoted = false;
+        } else length++;
+        if (!/\s/.test(ch) && ch !== '"') nonempty = true;
+      } else if (ch === delimiter) {
+        if (++width > LIMITS.propertiesPerFeature) throw new Error("CSV has more than " + LIMITS.propertiesPerFeature + " columns.");
+        length = 0; atStart = true;
+      } else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && text[i + 1] === '\n') i++;
+        record();
+      } else if (ch === '"' && atStart) {
+        quoted = true; atStart = false;
+      } else {
+        atStart = false; length++;
+        if (!/\s/.test(ch)) nonempty = true;
+      }
+      if (length > LIMITS.propertyString) throw new Error("A CSV value exceeds the 100,000 character limit.");
+    }
+    record();
     // Parse in chunks and stop one row past the feature limit. Parsing (or
     // even line-splitting) all of a huge CSV first would exhaust memory before
     // the limit could be checked.
     const parsed = { data: [], errors: 0, tooMany: false };
     root.Papa.parse(text, {
-      header: false, dynamicTyping: false, skipEmptyLines: "greedy", chunkSize: 1024 * 1024,
+      delimiter: delimiter, header: false, dynamicTyping: false, skipEmptyLines: "greedy", chunkSize: 1024 * 1024,
       chunk: function (result, parser) {
         parsed.errors += result.errors.length;
         for (let i = 0; i < result.data.length; i++) parsed.data.push(result.data[i]);
@@ -702,6 +747,17 @@
 
   const PROFILE_VERSION = 1;
 
+  function checkWorkspace(collections) {
+    let features = 0, coordinates = 0, bytes = 0;
+    for (const fc of collections) {
+      features += fc.features.length;
+      coordinates += fc.coordinateCount;
+      bytes += fc.estimatedBytes;
+    }
+    if (features > LIMITS.workspaceFeatures || coordinates > LIMITS.workspaceCoordinates || bytes > LIMITS.workspaceBytes)
+      throw new Error("Workspace memory budget exceeded (1,000,000 features, 10,000,000 coordinates, 512 MiB estimated data and rendering storage). Remove datasets before adding more.");
+  }
+
   function isProfile(data) {
     return !!data && typeof data === "object" && !Array.isArray(data) && (data.omamap === "profile" || data.__sdv_profile === true);
   }
@@ -722,7 +778,7 @@
     };
     const bf = st.byField;
     if (bf && typeof bf === "object" && typeof bf.field === "string" && bf.field && FORBIDDEN_PROPERTY_NAMES.indexOf(bf.field) < 0) {
-      out.byField = { field: bf.field.slice(0, 200), mode: bf.mode === "ranges" ? "ranges" : "categories", reverse: bf.reverse === true };
+      out.byField = { field: bf.field.slice(0, LIMITS.propertyString), mode: bf.mode === "ranges" ? "ranges" : "categories", reverse: bf.reverse === true };
     }
     return out;
   }
@@ -753,7 +809,10 @@
       let geojson;
       try { geojson = validateFeatureCollection(ds.geojson); }
       catch (e) { throw new Error("Profile dataset “" + name + "”: " + safeMessage(e)); }
-      datasets.push({ name: name, geojson: geojson, visible: ds.visible !== false, style: wimp ? wimpStyle(ds) : cleanStyle(ds.style), warnings: [] });
+      datasets.push({ name: name, geojson: geojson, visible: ds.visible !== false,
+        slot: Number.isSafeInteger(ds.slot) && ds.slot >= 0 && ds.slot <= 1000000 ? ds.slot : i,
+        style: wimp ? wimpStyle(ds) : cleanStyle(ds.style), warnings: [] });
+      checkWorkspace(datasets.map(function (item) { return item.geojson; }));
     });
     let view = null;
     const v = wimp ? (data.map && Array.isArray(data.map.center) ? { lat: data.map.center[0], lng: data.map.center[1], zoom: data.map.zoom } : null) : data.view;
@@ -774,6 +833,41 @@
   }
 
   /* ----------------------------- Dispatch -------------------------------- */
+
+  // Serialize in bounded batches, yielding between batches in the browser.
+  // A saved profile must fit the exact same UTF-8 byte limit as an import.
+  async function profileBlob(profile) {
+    const encoder = new TextEncoder(), chunks = [];
+    let pending = "", bytes = 0, started = performance.now();
+    function flush() {
+      if (!pending) return;
+      const chunk = encoder.encode(pending);
+      bytes += chunk.byteLength;
+      if (bytes > LIMITS.fileBytes) throw new Error("Profile exceeds the 100 MiB reopening limit. Remove datasets or save smaller workspaces. No file was saved.");
+      chunks.push(chunk); pending = "";
+    }
+    function append(text) { pending += text; if (pending.length >= 262144) flush(); }
+    function openObject(value) {
+      const members = JSON.stringify(value).slice(1, -1);
+      return "{" + members + (members ? "," : "");
+    }
+    const header = Object.assign({}, profile); delete header.datasets;
+    append(openObject(header) + '"datasets":[');
+    for (let d = 0; d < profile.datasets.length; d++) {
+      const ds = profile.datasets[d], metadata = Object.assign({}, ds); delete metadata.geojson;
+      append((d ? "," : "") + openObject(metadata) + '"geojson":{"type":"FeatureCollection","features":[');
+      for (let i = 0; i < ds.geojson.features.length; i++) {
+        append((i ? "," : "") + JSON.stringify(ds.geojson.features[i]));
+        if (performance.now() - started >= 8) {
+          await new Promise(function (resolve) { setTimeout(resolve, 0); });
+          started = performance.now();
+        }
+      }
+      append("]}}");
+    }
+    append("]}"); flush();
+    return new Blob(chunks, { type: "application/x-omamap-profile" });
+  }
 
   // Conversion notes travel with the dataset and show in the dataset list.
   function withNotes(name, fc) {
@@ -828,6 +922,8 @@
     inspectZipMetadata: inspectZipMetadata,
     bngToWgs84: bngToWgs84,
     PROFILE_VERSION: PROFILE_VERSION,
+    checkWorkspace: checkWorkspace,
+    profileBlob: profileBlob,
     extractZip: extractZip,
     parseBytes: parseBytes,
     parseShapefileSet: parseShapefileSet

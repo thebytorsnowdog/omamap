@@ -19,6 +19,8 @@ Running `omamap file` again sends the file to the open window. You can also drag
 
 A profile contains a full copy of the data, so share it with the same care as the data itself. Profiles exported from WIMP (`.sdv-profile.json`) open too.
 
+Profiles are limited to 100 MiB so every completed export fits the reopening limit. Oversized exports show an error before writing a file; save smaller workspaces in that case. Replacing an existing profile uses a completed temporary download and an atomic replacement, preserving the previous file if saving fails.
+
 | Key | Action |
 |---|---|
 | <kbd>O</kbd> | Open files or a profile |
@@ -55,6 +57,8 @@ Empty values are counted separately as "Missing". Class colours follow your them
 
 The table draws only the rows on screen, so it stays quick with large datasets.
 
+Fields from every feature are included, even when they first appear late in a dataset. Large searches and sorts run in short batches so the window can respond while they finish.
+
 ### Formats
 
 - **GeoJSON** (`.geojson`, `.json`) in WGS84 longitude/latitude.
@@ -68,7 +72,11 @@ Imports are validated before anything reaches the map. Malformed geometry, unsaf
 
 Limits: 100 MiB per file, 50 MiB per ZIP (250 MiB expanded, at most 50 layers and 1,000,000 features across them), 500,000 features, 5 million coordinates, 1,000 attribute names and 500 attributes per feature per dataset, 10 million values per CSV or shapefile table, 50 datasets.
 
+The whole workspace is also limited to 1 million features, 10 million coordinates, and 512 MiB of estimated data and rendering structures. This estimate is an admission budget, not a limit on the process's actual memory use. The table's search-text cache is limited to 16 MiB per dataset.
+
 Point datasets are drawn on the GPU (WebGL), so hundreds of thousands of points pan and zoom smoothly. Where WebGL isn't available, a 2D fallback is used. Lines and polygons use Leaflet's canvas renderer, which handles tens of thousands of shapes comfortably.
+
+Single-point features keep the fast renderer in mixed datasets too. GPU point positions stay in reusable buffers during navigation, and a spatial index narrows click selection to nearby candidates. File imports build layers in batches; Cancel also stops that stage.
 
 ## What leaves your machine
 
@@ -112,7 +120,7 @@ makepkg -si
 
 To update, run `git pull` in the clone and `makepkg -si` again. To uninstall, run `sudo pacman -R omamap`.
 
-Requires `qt6-base` and `qt6-webengine`. Building also needs `cmake`.
+Requires `qt6-base` and `qt6-webengine` 6.8 or newer. Building also needs `cmake`.
 
 ### Omarchy bar widget
 
@@ -153,6 +161,7 @@ cmake -S host -B build && cmake --build build
 npm install                 # playwright-core, for the browser tests
 npm test                    # parser, validation, bar widget and vendor-hash tests
 npm run test:browser        # drives core/ in Chromium, incl. hostile-input tests (CHROMIUM=/usr/bin/chromium)
+ctest --test-dir build --output-on-failure # native atomic profile replacement regressions
 tests/host-smoke.sh         # headless checks of the native host and its hardening (run test:browser first)
 npm run serve               # core/ at http://127.0.0.1:8765 for quick UI work
 ```

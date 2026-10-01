@@ -32,6 +32,7 @@ const N_POINTS = Number(process.env.BENCH_POINTS || 100000), N_POLYS = Number(pr
       await settle(); longest = 0;
       const t = performance.now();
       await fn();
+      await Table.pending;
       await settle();
       out.push({ name: name, ms: Math.round(performance.now() - t), freeze: Math.round(longest) });
     };
@@ -60,7 +61,7 @@ const N_POINTS = Number(process.env.BENCH_POINTS || 100000), N_POLYS = Number(pr
     await measure("table row click", async () => { Table.inView = false; Table.refilter(); Table.choose(Table.order[5], false); });
     await measure("table polygons", async () => { Table.open(Q); });
     await measure("hide + show polygons", async () => { toggleVisible(Q.id); toggleVisible(Q.id); });
-    await measure("save profile (build+stringify)", async () => { JSON.stringify(buildProfile()); });
+    await measure("save profile (bounded export)", async () => { await OmaParse.profileBlob(buildProfile()); });
     return out;
   }, [N_POINTS, N_POLYS]);
   console.log("operation".padEnd(34) + "wall ms   longest freeze ms");

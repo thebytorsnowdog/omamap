@@ -1,6 +1,7 @@
 #include "window.h"
 
 #include "recent.h"
+#include "profile_save.h"
 #include "scheme.h"
 #include "theme.h"
 
@@ -8,6 +9,8 @@
 #include <QColor>
 #include <QDateTime>
 #include <QTimer>
+#include <QTemporaryDir>
+#include <memory>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
@@ -134,6 +137,8 @@ Window::Window(QWebEngineProfile *profile, SchemeHandler *scheme, ThemeWatcher *
         pushTheme();
         flush();
         if (qEnvironmentVariableIsSet("OMAMAP_SELFTEST")) {
+            fprintf(stderr, "OMAMAP_SELFTEST_READY\n");
+            fflush(stderr);
             const QString script = qEnvironmentVariable("OMAMAP_SELFTEST_JS");
             if (!script.isEmpty()) QTimer::singleShot(2500, this, [this, script] { this->page()->runJavaScript(script); });
             QTimer::singleShot(qEnvironmentVariableIntValue("OMAMAP_SELFTEST_DELAY") ?: 4000, this, &Window::selfTest);
@@ -207,21 +212,28 @@ void Window::saveDownload(QWebEngineDownloadRequest *download)
     }
     const QFileInfo info(target);
     settings.setValue(QStringLiteral("profiles/lastDir"), info.absolutePath());
-    // The dialog has already confirmed replacing an existing file.
-    if (info.exists()) QFile::remove(info.absoluteFilePath());
-
-    download->setDownloadDirectory(info.absolutePath());
-    download->setDownloadFileName(info.fileName());
+    // Stage in a private directory on the destination filesystem. Keep the
+    // old profile until the complete replacement is durable and ready.
+    const auto staging = std::make_shared<QTemporaryDir>(info.absolutePath() + QStringLiteral("/.omamap-save-XXXXXX"));
+    if (!staging->isValid()) {
+        download->cancel();
+        page()->runJavaScript(QStringLiteral("toast('Could not save the profile', 'The destination cannot be written. Your previous profile is unchanged.', 'err');"));
+        return;
+    }
+    download->setDownloadDirectory(staging->path());
+    download->setDownloadFileName(QStringLiteral("profile.omamap"));
     const QString path = info.absoluteFilePath();
-    connect(download, &QWebEngineDownloadRequest::isFinishedChanged, this, [this, download, path] {
+    connect(download, &QWebEngineDownloadRequest::isFinishedChanged, this, [this, download, path, staging] {
         if (!download->isFinished()) return;
-        if (download->state() == QWebEngineDownloadRequest::DownloadCompleted) {
+        if (download->state() == QWebEngineDownloadRequest::DownloadCompleted
+            && commitProfile(staging->filePath(QStringLiteral("profile.omamap")), path)) {
             Recent::add(path);
             const QString arg = QString::fromUtf8(QJsonDocument(QJsonArray{path}).toJson(QJsonDocument::Compact));
             page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.profileSaved(%1[0]);").arg(arg));
         } else {
-            page()->runJavaScript(QStringLiteral("toast('Could not save the profile', 'The file could not be written.', 'err');"));
+            page()->runJavaScript(QStringLiteral("toast('Could not save the profile', 'The file could not be written. Your previous profile is unchanged.', 'err');"));
         }
+        staging->remove();
     });
     download->accept();
 }

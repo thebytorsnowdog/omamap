@@ -39,7 +39,10 @@ function prepareStyle(style) {
   return style;
 }
 FastPoint.prototype.setStyle = function (style) {
+  if (this._style === style) return this;
   prepareStyle(style);
+  this._group._dirtyStart = Math.min(this._group._dirtyStart ?? Infinity, this._slot);
+  this._group._dirtyEnd = Math.max(this._group._dirtyEnd ?? -1, this._slot);
   this.options = style.__full;
   this._style = style;
   this._key = style.__key;
@@ -62,11 +65,17 @@ const FastPoints = L.Layer.extend({
   // items: [{ latlng, feature, index }]
   initialize: function (items, options) {
     L.setOptions(this, options);
-    const crs = L.CRS.EPSG3857;
     this._points = new Array(items.length);
     this._xy0 = new Float64Array(items.length * 2);    // projected at zoom 0
     this._bounds = L.latLngBounds([]);
-    for (let i = 0; i < items.length; i++) {
+    this._front = null;
+    this._frame = 0;
+    if (!this.options.deferred) this.fillItems(items, 0, items.length);
+  },
+
+  fillItems: function (items, start, end) {
+    const crs = L.CRS.EPSG3857;
+    for (let i = start; i < end; i++) {
       const it = items[i];
       this._points[i] = new FastPoint(this, i, it.latlng, it.feature, it.index);
       const p = crs.latLngToPoint(it.latlng, 0);
@@ -74,8 +83,6 @@ const FastPoints = L.Layer.extend({
       this._xy0[2 * i + 1] = p.y;
       this._bounds.extend(it.latlng);
     }
-    this._front = null;
-    this._frame = 0;
   },
 
   getLayers: function () { return this._points; },
@@ -184,8 +191,9 @@ const FastPoints = L.Layer.extend({
     this._origin = map.getPixelOrigin();
     const b = this._pxBounds, s = b.getSize(), dpr = window.devicePixelRatio || 1;
     L.DomUtil.setPosition(this._canvas, b.min);
-    this._canvas.width = dpr * s.x;
-    this._canvas.height = dpr * s.y;
+    const width = Math.round(dpr * s.x), height = Math.round(dpr * s.y);
+    if (this._canvas.width !== width) this._canvas.width = width;
+    if (this._canvas.height !== height) this._canvas.height = height;
     this._canvas.style.width = s.x + "px";
     this._canvas.style.height = s.y + "px";
     this._draw();
@@ -240,35 +248,42 @@ const FastPoints = L.Layer.extend({
     // Canvas coordinates: layer point minus the canvas's top-left layer point.
     const xy = this._xy0, s = this._scale, ox = this._origin.x + b.min.x, oy = this._origin.y + b.min.y;
     const pts = this._points;
-    const data = gl.omaData.length >= pts.length * FLOATS ? gl.omaData : (gl.omaData = new Float32Array(pts.length * FLOATS));
-    let n = 0;
-    const put = function (pt, x, y) {
-      const o = pt.options, f = pt._style.__fill, c = pt._style.__stroke, k = n * FLOATS;
-      data[k] = x; data[k + 1] = y;
-      data[k + 2] = f[0]; data[k + 3] = f[1]; data[k + 4] = f[2]; data[k + 5] = o.fillOpacity;
-      data[k + 6] = c[0]; data[k + 7] = c[1]; data[k + 8] = c[2]; data[k + 9] = o.weight > 0 ? o.opacity : 0;
-      data[k + 10] = o.radius; data[k + 11] = o.weight;
-      n++;
-    };
-    const maxX = size.x + 20, maxY = size.y + 20;
-    for (let i = 0; i < pts.length; i++) {
-      const x = xy[2 * i] * s - ox, y = xy[2 * i + 1] * s - oy;
-      if (x < -20 || x > maxX || y < -20 || y > maxY || pts[i] === this._front) continue;
-      put(pts[i], x, y);
+    const fresh = gl.omaData.length !== pts.length * FLOATS;
+    if (fresh) {
+      gl.omaData = new Float32Array(pts.length * FLOATS);
+      this._dirtyStart = 0; this._dirtyEnd = pts.length - 1;
     }
-    if (this._front && this._front._group === this) {
-      const slot = this._front._slot;
-      put(this._front, xy[2 * slot] * s - ox, xy[2 * slot + 1] * s - oy);
+    const data = gl.omaData;
+    const start = this._dirtyStart ?? Infinity, end = this._dirtyEnd ?? -1;
+    for (let i = start; i <= end; i++) {
+      const pt = pts[i], o = pt.options, f = pt._style.__fill, c = pt._style.__stroke, k = i * FLOATS;
+      const x = xy[2*i], y = xy[2*i+1];
+      data[k] = x; data[k+1] = y;
+      // Split coordinates preserve precision at high zoom without uploading
+      // every point again when the map pans or zooms.
+      data[k+12] = x - data[k]; data[k+13] = y - data[k+1];
+      data[k+2] = f[0]; data[k+3] = f[1]; data[k+4] = f[2]; data[k+5] = o.fillOpacity;
+      data[k+6] = c[0]; data[k+7] = c[1]; data[k+8] = c[2]; data[k+9] = o.weight > 0 ? o.opacity : 0;
+      data[k+10] = o.radius; data[k+11] = o.weight;
     }
-    gl.viewport(0, 0, this._canvas.width, this._canvas.height);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    if (!n) return;
     gl.bindBuffer(gl.ARRAY_BUFFER, gl.omaBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, n * FLOATS), gl.STREAM_DRAW);
+    if (fresh) gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+    else if (end >= start) gl.bufferSubData(gl.ARRAY_BUFFER, start * FLOATS * 4, data.subarray(start * FLOATS, (end+1) * FLOATS));
+    this._dirtyStart = Infinity; this._dirtyEnd = -1;
+    gl.viewport(0, 0, this._canvas.width, this._canvas.height);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
     gl.uniform2f(gl.omaUniforms.resolution, size.x, size.y);
     gl.uniform1f(gl.omaUniforms.dpr, dpr);
-    gl.drawArrays(gl.POINTS, 0, n);
+    const x0 = ox / s, y0 = oy / s, hx = Math.fround(x0), hy = Math.fround(y0);
+    gl.uniform2f(gl.omaUniforms.originHigh, hx, hy);
+    gl.uniform2f(gl.omaUniforms.originLow, x0-hx, y0-hy);
+    gl.uniform1f(gl.omaUniforms.scale, s);
+    if (this._front) {
+      const slot = this._front._slot;
+      if (slot) gl.drawArrays(gl.POINTS, 0, slot);
+      if (slot+1 < pts.length) gl.drawArrays(gl.POINTS, slot+1, pts.length-slot-1);
+      gl.drawArrays(gl.POINTS, slot, 1);
+    } else gl.drawArrays(gl.POINTS, 0, pts.length);
   }
 });
 
@@ -296,14 +311,15 @@ function paint(ctx, o, xs, ys) {
 /* ------------------------------- WebGL ----------------------------------- */
 // Per point: x, y (css px from canvas top-left), fill rgba, stroke rgba,
 // radius, stroke width (css px).
-const FLOATS = 12;
+const FLOATS = 14;
 
 const VERTEX_SHADER = [
-  "attribute vec2 a_pos; attribute vec4 a_fill; attribute vec4 a_stroke; attribute vec2 a_size;",
-  "uniform vec2 u_resolution; uniform mediump float u_dpr;",   // same precision as the fragment shader
+  "attribute vec2 a_pos; attribute vec2 a_low; attribute vec4 a_fill; attribute vec4 a_stroke; attribute vec2 a_size;",
+  "uniform vec2 u_resolution; uniform vec2 u_originHigh; uniform vec2 u_originLow; uniform float u_scale; uniform mediump float u_dpr;",   // same precision as the fragment shader
   "varying vec4 v_fill; varying vec4 v_stroke; varying vec3 v_shape;",
   "void main() {",
-  "  vec2 clip = a_pos / u_resolution * 2.0 - 1.0;",
+  "  vec2 pos = ((a_pos - u_originHigh) + (a_low - u_originLow)) * u_scale;",
+  "  vec2 clip = pos / u_resolution * 2.0 - 1.0;",
   "  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);",
   "  float outer = a_size.x + a_size.y * 0.5 + 1.0;",
   "  gl_PointSize = outer * 2.0 * u_dpr;",
@@ -352,12 +368,13 @@ function initGL(canvas) {
     gl.omaBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, gl.omaBuffer);
     const stride = FLOATS * 4;
-    [["a_pos", 2, 0], ["a_fill", 4, 2], ["a_stroke", 4, 6], ["a_size", 2, 10]].forEach(function (a) {
+    [["a_pos", 2, 0], ["a_fill", 4, 2], ["a_stroke", 4, 6], ["a_size", 2, 10], ["a_low", 2, 12]].forEach(function (a) {
       const loc = gl.getAttribLocation(prog, a[0]);
       gl.enableVertexAttribArray(loc);
       gl.vertexAttribPointer(loc, a[1], gl.FLOAT, false, stride, a[2] * 4);
     });
-    gl.omaUniforms = { resolution: gl.getUniformLocation(prog, "u_resolution"), dpr: gl.getUniformLocation(prog, "u_dpr") };
+    gl.omaUniforms = {};
+    ["resolution", "dpr", "originHigh", "originLow", "scale"].forEach(function (key) { gl.omaUniforms[key] = gl.getUniformLocation(prog, "u_" + key); });
     gl.omaData = new Float32Array(0);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
