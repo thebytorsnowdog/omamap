@@ -41,4 +41,6 @@ private:
     ThemeWatcher *m_theme;
     QStringList m_pending;
     bool m_ready = false;
+    bool m_recovered = false;
+    QList<qint64> m_crashes;
 };

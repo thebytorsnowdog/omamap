@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "thebytorsnowdog.omamap",
   "name": "OmaMap",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "thebytorsnowdog",
   "license": "MIT",
   "description": "Open OmaMap and your recent spatial files and profiles from the bar. Needs the OmaMap app installed.",

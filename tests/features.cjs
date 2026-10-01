@@ -311,12 +311,72 @@ function fixtures(dir) {
     assert.equal(await page.evaluate(() => STATE.datasets.length), 2);
   });
 
+  /* ------------------------------ Reliability ------------------------------ */
+  const makeFile = (name, n) => page.evaluateHandle(([name, n]) => {
+    const f = []; for (let i = 0; i < n; i++) f.push({ type: "Feature", properties: { i: i }, geometry: { type: "Point", coordinates: [-3 + (i % 100) * 0.001, 56 + Math.floor(i / 100) * 0.001] } });
+    return new File([JSON.stringify({ type: "FeatureCollection", features: f })], name);
+  }, [name, n]);
+
+  await check("drops made while a load is running are queued, not interleaved", async () => {
+    await page.evaluate(() => clearAll());
+    const a = await makeFile("first.geojson", 50000), b = await makeFile("second.geojson", 10);
+    const order = await page.evaluate(async ([a, b]) => {
+      const seen = [];
+      const orig = window.addDataset;
+      window.addDataset = function (p) { seen.push(p.name); return orig(p); };
+      await Promise.all([handleFiles([a]), handleFiles([b])]);
+      window.addDataset = orig;
+      return { seen: seen, spinnerHidden: document.getElementById("loading").hidden };
+    }, [a, b]);
+    assert.deepEqual(order.seen, ["first", "second"]);
+    assert.equal(order.spinnerHidden, true);
+  });
+
+  await check("a worker crash fails only the in-flight file, and loading keeps working", async () => {
+    await page.evaluate(() => clearAll());
+    const big = await makeFile("crashy.geojson", 200000), ok = await makeFile("after.geojson", 5);
+    const result = await page.evaluate(async ([big, ok]) => {
+      // Crash the worker the moment it receives the file: what a worker
+      // crash (e.g. out of memory) delivers is an error event.
+      const crashed = Parser.worker;
+      const run = Parser.run;
+      Parser.run = function (message, transfer) {
+        Parser.run = run;
+        const pending = run.call(Parser, message, transfer);
+        crashed.onerror({ preventDefault: function () {} });
+        return pending;
+      };
+      await handleFiles([big]);
+      await handleFiles([ok]);
+      return { names: STATE.datasets.map((d) => d.name), fresh: !!Parser.worker && Parser.worker !== crashed, spinnerHidden: document.getElementById("loading").hidden,
+        toasts: Array.from(document.querySelectorAll(".toast.err")).map((t) => t.textContent) };
+    }, [big, ok]);
+    assert.deepEqual(result.names, ["after"]);
+    assert.equal(result.fresh, true);
+    assert.equal(result.spinnerHidden, true);
+    assert.ok(result.toasts.some((t) => /crashy/.test(t) && /stopped unexpectedly/.test(t)), JSON.stringify(result.toasts));
+  });
+
+  await check("Cancel stops a slow load and the next load works", async () => {
+    await page.evaluate(() => { clearAll(); document.querySelectorAll(".toast").forEach((t) => t.remove()); });
+    const big = await makeFile("slow.geojson", 200000), next = await makeFile("next.geojson", 3);
+    const loading = page.evaluate((big) => handleFiles([big]), big);
+    await page.waitForSelector("#loading:not([hidden])");
+    await page.click("#loading-cancel");
+    await loading;
+    assert.equal(await page.locator("#loading").isHidden(), true);
+    assert.match(await page.locator(".toast.warn").first().textContent(), /cancelled/i);
+    await page.evaluate((f) => handleFiles([f]), next);
+    assert.deepEqual(await page.evaluate(() => STATE.datasets.map((d) => d.name)), ["next"]);
+  });
+
   // Draw a row of points with each renderer and check the pixels land where
   // Leaflet says the points are.
   for (const renderer of ["webgl", "2d"]) {
     await check("point renderer (" + renderer + ") draws points where they are", async () => {
       const result = await page.evaluate(async (mode) => {
         FastPoints.disableWebGL = mode === "2d";
+        FastPoints.glMinPoints = 1;   // exercise WebGL even for a small layer
         clearAll();
         const feats = [];
         for (let i = 0; i < 20; i++) feats.push({ type: "Feature", properties: { i: i }, geometry: { type: "Point", coordinates: [-3 + i * 0.02, 56] } });
@@ -339,6 +399,7 @@ function fixtures(dir) {
           misses.push(alphaAt(p.x, p.y + 30));   // well clear of any point
         }
         FastPoints.disableWebGL = false;
+        FastPoints.glMinPoints = 1000;
         return { mode: layer._mode, hits: hits, misses: misses };
       }, renderer);
       assert.equal(result.mode, renderer);
@@ -346,6 +407,27 @@ function fixtures(dir) {
       assert.ok(result.misses.every((a) => a === 0), "pixels drawn where no point is: " + result.misses);
     });
   }
+
+  await check("GPU contexts are reused on hide/show and released on remove", async () => {
+    const r = await page.evaluate(async () => {
+      clearAll();
+      FastPoints.glMinPoints = 1;
+      const make = (n) => ({ type: "FeatureCollection", features: Array.from({ length: n }, (_, i) => ({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [-3 + i * 0.001, 56] } })) });
+      const added = [];
+      for (let i = 0; i < 12; i++) added.push(addDataset({ name: "L" + i, geojson: make(5) }));
+      const live = FastPoints.glLive, modes = added.map((d) => d.layer._mode);
+      const gl = added[0].layer._gl;
+      toggleVisible(added[0].id); toggleVisible(added[0].id); toggleVisible(added[0].id); toggleVisible(added[0].id);
+      const reused = added[0].layer._gl === gl && FastPoints.glLive === live;
+      clearAll();
+      FastPoints.glMinPoints = 1000;
+      return { live: live, webgl: modes.filter((m) => m === "webgl").length, reused: reused, after: FastPoints.glLive };
+    });
+    assert.equal(r.webgl, 8, "at most 8 WebGL layers");
+    assert.equal(r.live, 8);
+    assert.equal(r.reused, true);
+    assert.equal(r.after, 0, "contexts released after clearing");
+  });
 
   await check("no page errors", async () => { assert.deepEqual(errors, []); });
 

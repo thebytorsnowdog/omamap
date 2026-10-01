@@ -19,18 +19,34 @@ function FastPoint(group, slot, latlng, feature, index) {
   this.feature = feature;
   this._omaIndex = index;     // feature index in the dataset
   this.isFastPoint = true;
-  this.options = { radius: 5, fillColor: "#888888", fillOpacity: 0.9, color: "#000000", weight: 1, opacity: 1 };
-  this._key = "";
+  this.options = DEFAULT_POINT_STYLE.__full;
+  this._style = DEFAULT_POINT_STYLE;
+  this._key = DEFAULT_POINT_STYLE.__key;
 }
 FastPoint.prototype.getLatLng = function () { return this._latlng; };
+// Styles are shared between points and never mutated, so a point keeps a
+// reference rather than a copy. Each distinct style is prepared once: an
+// identity key for batching and its colours as GPU-ready floats.
+let styleSeq = 0;
+function prepareStyle(style) {
+  if (style.__key === undefined) {
+    const full = Object.assign({ radius: 5, fillColor: "#888888", fillOpacity: 0.9, color: "#000000", weight: 1, opacity: 1 }, style);
+    Object.defineProperty(style, "__key", { value: ++styleSeq });
+    Object.defineProperty(style, "__full", { value: full });
+    Object.defineProperty(style, "__fill", { value: colour(full.fillColor) });
+    Object.defineProperty(style, "__stroke", { value: colour(full.color) });
+  }
+  return style;
+}
 FastPoint.prototype.setStyle = function (style) {
-  const o = this.options;
-  for (const k in style) o[k] = style[k];
-  this._key = o.fillColor + "|" + o.fillOpacity + "|" + o.color + "|" + o.weight + "|" + o.opacity + "|" + o.radius;
+  prepareStyle(style);
+  this.options = style.__full;
+  this._style = style;
+  this._key = style.__key;
   this._group._requestRedraw();
   return this;
 };
-FastPoint.prototype.setRadius = function (r) { return this.setStyle({ radius: r }); };
+FastPoint.prototype.setRadius = function (r) { return this.setStyle(Object.assign({}, this.options, { radius: r })); };
 FastPoint.prototype.bringToFront = function () { this._group._front = this; this._group._requestRedraw(); return this; };
 FastPoint.prototype._containsPoint = function (p) {
   const pt = this._group._layerPoint(this._slot);
@@ -78,6 +94,12 @@ const FastPoints = L.Layer.extend({
   },
 
   onAdd: function () {
+    // Hiding and showing a dataset reuses its canvas and GPU context.
+    if (this._canvas) {
+      this.getPane().appendChild(this._canvas);
+      this._update();
+      return;
+    }
     const make = () => {
       const c = L.DomUtil.create("canvas", "omamap-points");
       if (this._zoomAnimated) L.DomUtil.addClass(c, "leaflet-zoom-animated");
@@ -85,12 +107,21 @@ const FastPoints = L.Layer.extend({
       return c;
     };
     let canvas = make();
-    this._gl = FastPoints.disableWebGL ? null : initGL(canvas);
+    // Browsers cap live WebGL contexts per page (about 16) and drop the oldest
+    // beyond that, so the GPU is kept for layers big enough to need it.
+    const wantGL = !FastPoints.disableWebGL && this._points.length >= FastPoints.glMinPoints && FastPoints.glLive < FastPoints.glMaxLayers;
+    this._gl = wantGL ? initGL(canvas) : null;
+    if (this._gl) FastPoints.glLive++;
     // A canvas that tried WebGL can't give a 2D context; start again.
     if (!this._gl) { canvas = make(); this._ctx = canvas.getContext("2d"); }
     this._canvas = canvas;
     this._mode = this._gl ? "webgl" : "2d";
-    canvas.addEventListener("webglcontextlost", (e) => { e.preventDefault(); this._gl = null; this._mode = "2d"; this._replaceCanvas(); });
+    canvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      if (this._gl) FastPoints.glLive--;
+      this._gl = null; this._mode = "2d";
+      if (!this._disposed) this._replaceCanvas();
+    });
     this.getPane().appendChild(canvas);
     this._update();
   },
@@ -107,8 +138,22 @@ const FastPoints = L.Layer.extend({
 
   onRemove: function () {
     cancelAnimationFrame(this._frame);
-    L.DomUtil.remove(this._canvas);
+    this._frame = 0;
+    L.DomUtil.remove(this._canvas);   // kept for re-adding; see dispose()
+  },
+
+  // Release the GPU context when the dataset is removed for good.
+  dispose: function () {
+    this._disposed = true;
+    if (this._map) this._map.removeLayer(this);
+    if (this._gl) {
+      FastPoints.glLive--;
+      const ext = this._gl.getExtension("WEBGL_lose_context");
+      this._gl = null;
+      if (ext) ext.loseContext();
+    }
     this._canvas = null;
+    this._ctx = null;
   },
 
   _reset: function () { this._update(); this._updateTransform(this._center, this._zoom); },
@@ -198,7 +243,7 @@ const FastPoints = L.Layer.extend({
     const data = gl.omaData.length >= pts.length * FLOATS ? gl.omaData : (gl.omaData = new Float32Array(pts.length * FLOATS));
     let n = 0;
     const put = function (pt, x, y) {
-      const o = pt.options, f = colour(o.fillColor), c = colour(o.color), k = n * FLOATS;
+      const o = pt.options, f = pt._style.__fill, c = pt._style.__stroke, k = n * FLOATS;
       data[k] = x; data[k + 1] = y;
       data[k + 2] = f[0]; data[k + 3] = f[1]; data[k + 4] = f[2]; data[k + 5] = o.fillOpacity;
       data[k + 6] = c[0]; data[k + 7] = c[1]; data[k + 8] = c[2]; data[k + 9] = o.weight > 0 ? o.opacity : 0;
@@ -362,6 +407,10 @@ function stamp(ctx, o, xs, ys, dpr) {
   for (let i = 0; i < xs.length; i++) ctx.drawImage(s.canvas, xs[i] - s.half, ys[i] - s.half, size, size);
 }
 
+FastPoints.glLive = 0;          // WebGL contexts currently held
+FastPoints.glMaxLayers = 8;     // stay well under the browser's context cap
+FastPoints.glMinPoints = 1000;  // smaller layers draw quickly enough in 2D
+
 /* Build a FastPoints layer if every feature is a single Point. */
 function fastPointsFor(features) {
   if (!features.length) return null;
@@ -373,3 +422,5 @@ function fastPointsFor(features) {
   }
   return new FastPoints(items);
 }
+
+const DEFAULT_POINT_STYLE = prepareStyle({});

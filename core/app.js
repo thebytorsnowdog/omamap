@@ -24,7 +24,8 @@ const STATE = {
   nextId: 1,
   nextSlot: 0,
   hits: [],               // [{ ds, layer }] under the last click, topmost first
-  hitIndex: 0
+  hitIndex: 0,
+  themeVersion: 0         // bumped on every theme change; invalidates colour caches
 };
 
 /* ------------------------------ Utilities -------------------------------- */
@@ -93,8 +94,12 @@ function applyTheme(theme) {
   const colors = theme.colors || {};
   const rootStyle = document.documentElement.style;
   cssCache.clear();
+  STATE.themeVersion++;
+  // Keys missing from this theme fall back to the stylesheet defaults rather
+  // than keeping the previous theme's value.
   Object.keys(THEME_VARS).forEach(function (key) {
     if (isHex(colors[key])) rootStyle.setProperty(THEME_VARS[key], colors[key]);
+    else rootStyle.removeProperty(THEME_VARS[key]);
   });
   if (typeof theme.font === "string" && /^[\w .,'"-]{1,80}$/.test(theme.font)) {
     rootStyle.setProperty("--font", '"' + theme.font.replace(/["']/g, "") + '", ui-monospace, monospace');
@@ -205,15 +210,31 @@ function leafStyle(leaf, colour, style, selected) {
   return { color: colour, weight: style.weight, opacity: 0.95 };
 }
 
-function styleFeatureLayer(layer, ds, selected) {
+function leafKind(leaf) {
+  return leaf.isFastPoint || leaf instanceof L.CircleMarker ? "p" : leaf instanceof L.Polygon ? "a" : "l";
+}
+
+// Features that look the same share one style object (treated as read-only),
+// so restyling a large dataset allocates per class, not per feature.
+function styleFeatureLayer(layer, ds, selected, cache) {
   const colour = featureColour(ds, layer._omaIndex);
   eachLeaf(layer, function (leaf) {
-    if (leaf.setStyle) leaf.setStyle(leafStyle(leaf, colour, ds.style, selected));
+    if (!leaf.setStyle) return;
+    const kind = leafKind(leaf);
+    const key = kind + colour + (selected ? "!" : "");
+    let st = cache && cache.get(key);
+    if (!st) {
+      st = leafStyle(leaf, colour, ds.style, selected);
+      if (cache) cache.set(key, st);
+    }
+    leaf.setStyle(st);
   });
 }
 
 function applyDatasetStyle(ds) {
-  ds.layers.forEach(function (layer) { styleFeatureLayer(layer, ds, false); });
+  const cache = new Map();
+  const layers = ds.layers;
+  for (let i = 0; i < layers.length; i++) styleFeatureLayer(layers[i], ds, false, cache);
 }
 
 /* ------------------------------ Datasets --------------------------------- */
@@ -306,7 +327,7 @@ function removeDataset(id) {
   if (index < 0) return;
   const ds = STATE.datasets[index];
   if (STATE.hits.some(function (h) { return h.ds === ds; })) clearSelection();
-  STATE.map.removeLayer(ds.layer);
+  disposeDataset(ds);
   STATE.datasets.splice(index, 1);
   if (STATE.styleOpenId === ds.id) STATE.styleOpenId = null;
   renderLayerList();
@@ -315,9 +336,15 @@ function removeDataset(id) {
   setStatus("Removed " + ds.name + ".");
 }
 
+// Remove a dataset's layer from the map and free what it holds (GPU context).
+function disposeDataset(ds) {
+  if (typeof ds.layer.dispose === "function") ds.layer.dispose();
+  else STATE.map.removeLayer(ds.layer);
+}
+
 function clearAll() {
   clearSelection();
-  STATE.datasets.forEach(function (ds) { STATE.map.removeLayer(ds.layer); });
+  STATE.datasets.forEach(disposeDataset);
   STATE.datasets = [];
   STATE.nextSlot = 0;
   STATE.styleOpenId = null;
@@ -703,37 +730,56 @@ function fallbackCopy(text, done) {
 }
 
 /* ------------------------------- Parsing --------------------------------- */
+class LoadCancelled extends Error {}
+
+/* Parsing runs in a worker. In-flight files have their bytes transferred to
+   it, so if the worker dies (e.g. a file too large for memory) or is
+   cancelled, those files fail with a clear error and a fresh worker serves
+   the next ones. If workers cannot run at all, parsing falls back to the
+   main thread. */
 const Parser = {
   worker: null,
   failed: false,
+  crashes: 0,
   jobs: new Map(),
   nextJob: 1,
   fallbackReady: null,
 
   start: function () {
-    try {
-      this.worker = new Worker("parse-worker.js");
-      this.worker.onmessage = (e) => {
-        const job = this.jobs.get(e.data.id);
-        if (!job) return;
-        this.jobs.delete(e.data.id);
-        if (e.data.ok) job.resolve(e.data.datasets); else job.reject(new Error(e.data.error));
-      };
-      this.worker.onerror = (e) => {
-        e.preventDefault();
-        this.failWorker();
-      };
-    } catch (e) { this.failWorker(); }
+    if (this.failed) return;
+    let worker;
+    try { worker = new Worker("parse-worker.js"); }
+    catch (e) { this.failed = true; return; }
+    this.worker = worker;
+    worker.onmessage = (e) => {
+      const job = this.jobs.get(e.data && e.data.id);
+      if (!job) return;
+      this.jobs.delete(e.data.id);
+      if (e.data.ok) job.resolve(e.data.datasets); else job.reject(new Error(e.data.error));
+    };
+    worker.onmessageerror = () => this.stop(new Error("The parsed data could not be passed back to the map."));
+    worker.onerror = (e) => {
+      e.preventDefault();
+      // Before any job has run this means workers are unusable here.
+      if (!this.jobs.size && !this.everRan) { this.worker = null; this.failed = true; worker.terminate(); return; }
+      this.crashes++;
+      this.stop(new Error("The file reader stopped unexpectedly. The file may be too large for the available memory."));
+    };
   },
 
-  // If the worker cannot start, parse on the main thread instead.
-  failWorker: function () {
-    this.failed = true;
+  // Fail every in-flight job and start a fresh worker for later ones.
+  stop: function (reason) {
     if (this.worker) this.worker.terminate();
     this.worker = null;
     const pending = Array.from(this.jobs.values());
     this.jobs.clear();
-    pending.forEach((job) => { this.runLocal(job.message).then(job.resolve, job.reject); });
+    pending.forEach(function (job) { job.reject(reason); });
+    if (this.crashes > 3) this.failed = true;   // keep crashing: stop trying workers
+    else this.start();
+  },
+
+  cancel: function () {
+    if (this.jobs.size) this.stop(new LoadCancelled("Loading cancelled."));
   },
 
   loadFallback: function () {
@@ -763,7 +809,8 @@ const Parser = {
     return new Promise((resolve, reject) => {
       const id = this.nextJob++;
       message.id = id;
-      this.jobs.set(id, { resolve: resolve, reject: reject, message: message });
+      this.everRan = true;
+      this.jobs.set(id, { resolve: resolve, reject: reject });
       this.worker.postMessage(message, transfer || []);
     });
   }
@@ -794,9 +841,17 @@ async function parseShapefileSet(stem, group) {
   return Parser.run({ kind: "shapefile-set", name: stem, parts: parts }, Object.values(parts));
 }
 
-/* Accepts File objects (drop / picker) or host-supplied { name, size, arrayBuffer }. */
-async function handleFiles(fileList) {
+/* Accepts File objects (drop / picker) or host-supplied { name, size, arrayBuffer }.
+   Batches load one after another, so a second drop waits for the first. */
+let loadQueue = Promise.resolve();
+function handleFiles(fileList) {
   const files = Array.from(fileList || []).filter(Boolean);
+  const run = loadQueue.then(function () { return loadFiles(files); });
+  loadQueue = run.catch(function () {});
+  return run;
+}
+
+async function loadFiles(files) {
   if (!files.length) return;
   if (files.length > MAX_FILES_PER_DROP) { toast("Too many files", "Add at most " + MAX_FILES_PER_DROP + " files at once.", "err"); return; }
 
@@ -823,6 +878,7 @@ async function handleFiles(fileList) {
 
   const added = [];
   let profileOpened = null;
+  try {
   for (let i = 0; i < jobs.length; i++) {
     setLoading(true, "Reading " + jobs[i].label + (jobs.length > 1 ? " (" + (i + 1) + "/" + jobs.length + ")" : "") + "…");
     try {
@@ -837,10 +893,16 @@ async function handleFiles(fileList) {
       }
       result.forEach(function (parsed) { added.push(addDataset(parsed)); });
     } catch (error) {
+      if (error instanceof LoadCancelled) {
+        toast("Loading cancelled", jobs.length - i > 1 ? "Skipped " + plural(jobs.length - i, "file") + "." : jobs[i].label, "warn");
+        break;
+      }
       toast("Could not load " + jobs[i].label, OmaParse.safeMessage(error, "The file was rejected."), "err");
     }
   }
-  setLoading(false);
+  } finally {
+    setLoading(false);
+  }
   renderLayerList();
   Table.onDatasetsChanged();
   if (profileOpened) {
@@ -909,7 +971,7 @@ function saveProfile() {
 
 function restoreProfile(profile) {
   clearSelection();
-  STATE.datasets.slice().forEach(function (ds) { STATE.map.removeLayer(ds.layer); });
+  STATE.datasets.slice().forEach(disposeDataset);
   STATE.datasets = [];
   STATE.nextSlot = 0;
   STATE.styleOpenId = null;
@@ -967,7 +1029,7 @@ function profileSaved(path) {
   setStatus("Saved profile to " + String(path || "").slice(0, 300) + ".");
 }
 
-window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, setHost: setHost, profileSaved: profileSaved, version: "0.3.0" };
+window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, setHost: setHost, profileSaved: profileSaved, version: "0.3.1" };
 
 /* -------------------------------- Wiring --------------------------------- */
 function wireDragDrop() {
@@ -1058,6 +1120,7 @@ function boot() {
   Table.wire();
   el("btn-open").addEventListener("click", function () { el("file-input").click(); });
   el("btn-save").addEventListener("click", saveProfile);
+  el("loading-cancel").addEventListener("click", function () { Parser.cancel(); });
   el("layer-empty").addEventListener("click", function () { el("file-input").click(); });
   el("file-input").addEventListener("change", function () { const files = Array.from(this.files || []); this.value = ""; handleFiles(files); });
   el("btn-fit-all").addEventListener("click", fitAll);

@@ -226,7 +226,8 @@ function classColour(byField, c) {
     const t = n === 1 ? 0.5 : c / (n - 1);
     return rampAt(byField.reverse ? 1 - t : t);
   }
-  return categoryPalette()[c % categoryPalette().length];
+  const palette = categoryPalette();
+  return palette[c % palette.length];
 }
 
 // The theme palette, extended with blends when a field has many categories.
@@ -238,11 +239,24 @@ function categoryPalette() {
   return out;
 }
 
-/* Colour of one feature (by index) under its dataset's current style. */
+/* Colour of one feature (by index) under its dataset's current style.
+   Class colours are resolved once per theme / ramp direction and cached on
+   the classification, because this runs for every feature on every restyle. */
 function featureColour(ds, index) {
   const bf = ds.style.byField;
-  if (bf && ds.classOf) return classColour(bf, ds.classOf[index]);
-  return datasetColour(ds);
+  if (!bf || !ds.classOf) return datasetColour(ds);
+  const c = ds.classOf[index];
+  const cache = classColourCache(bf);
+  return c === CLASS_MISSING ? cache.missing : c === CLASS_OTHER ? cache.other : cache.colours[c];
+}
+
+function classColourCache(bf) {
+  const cache = bf.colourCache;
+  if (cache && cache.theme === STATE.themeVersion && cache.reverse === bf.reverse) return cache;
+  const colours = bf.classes.map(function (_, i) { return classColour(bf, i); });
+  bf.colourCache = { theme: STATE.themeVersion, reverse: bf.reverse, colours: colours,
+    missing: classColour(bf, CLASS_MISSING), other: classColour(bf, CLASS_OTHER) };
+  return bf.colourCache;
 }
 
 /* ---------------------------- Style editor ------------------------------- */

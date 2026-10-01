@@ -271,3 +271,22 @@ test("WIMP .sdv-profile.json files open as profiles", async () => {
   assert.deepEqual(p.datasets[0].style.byField, { field: "status", mode: "categories", reverse: false });
   assert.match(p.notes[0], /Service map/);
 });
+
+test("shapefile date fields read as YYYY-MM-DD text, empty dates as null", async () => {
+  const [ds] = await P.parseBytes("dated.zip", fixture("dated.zip"));
+  assert.equal(ds.geojson.features[0].properties.INSTALLED, "1987-03-14");
+  assert.equal(ds.geojson.features[1].properties.INSTALLED, null);
+});
+
+test("forbidden keys are rejected at any depth, and non-JSON objects refused", () => {
+  const nested = JSON.parse('{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{"a":{"b":[{"__proto__":{"polluted":true}}]}}}');
+  assert.throws(() => P.validateFeatureCollection(nested), /unsafe property name/);
+  assert.equal(({}).polluted, undefined);
+  const weird = { type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: { m: new Map() } };
+  assert.throws(() => P.validateFeatureCollection(weird), /only JSON values/);
+});
+
+test("validated geometry keeps only GeoJSON members", () => {
+  const fc = P.validateFeatureCollection({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [1, 2], extra: "x".repeat(1000), bbox: [1, 2, 1, 2] } });
+  assert.deepEqual(Object.keys(fc.features[0].geometry), ["type", "coordinates"]);
+});

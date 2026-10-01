@@ -55,6 +55,22 @@ else
   echo "✖ a saved profile reopens from the command line: $out"; fail=1
 fi
 
+# Kill the page's renderer process: the app must reload the page and say so.
+log=$(mktemp)
+OMAMAP_SELFTEST=1 OMAMAP_SELFTEST_DELAY=9000 timeout 60 "$bin" --new-window $fix/park.geojson > "$log" 2>/dev/null &
+app=$!
+sleep 4
+descendants() { local p; for p in $(pgrep -P "$1"); do echo "$p"; descendants "$p"; done; }
+renderer=$(for p in $(descendants $app); do grep -qa -- '--type=renderer' /proc/$p/cmdline 2>/dev/null && echo $p; done | head -1)
+[[ -n $renderer ]] && kill -9 "$renderer"
+wait $app || true
+out=$(tail -1 "$log"); rm -f "$log"
+if [[ -n $renderer && $out == *'OmaMap recovered'* ]]; then
+  echo "✔ a crashed page reloads with a notice"
+else
+  echo "✖ a crashed page reloads with a notice (renderer pid: ${renderer:-none}): $out"; fail=1
+fi
+
 # Live theme switch: replace the theme directory the way omarchy-theme-set does.
 themes=$(mktemp -d)
 mkdir -p "$themes/current/theme"

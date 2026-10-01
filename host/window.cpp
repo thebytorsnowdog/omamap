@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QDateTime>
 #include <QTimer>
 #include <QDesktopServices>
 #include <QDir>
@@ -81,6 +82,10 @@ Window::Window(QWebEngineProfile *profile, SchemeHandler *scheme, ThemeWatcher *
     connect(page, &QWebEnginePage::loadFinished, this, [this](bool ok) {
         if (!ok) return;
         m_ready = true;
+        if (m_recovered) {
+            m_recovered = false;
+            this->page()->runJavaScript(QStringLiteral("setTimeout(function () { toast('OmaMap recovered', 'The map stopped unexpectedly (often from running out of memory) and was restarted. Reopen your files or profile.', 'warn'); }, 300);"));
+        }
         this->page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.setHost({ version: \"" OMAMAP_VERSION "\" });"));
         pushTheme();
         flush();
@@ -91,6 +96,23 @@ Window::Window(QWebEngineProfile *profile, SchemeHandler *scheme, ThemeWatcher *
         }
     });
     connect(profile, &QWebEngineProfile::downloadRequested, this, &Window::saveDownload);
+
+    // If the page's process dies (most often out of memory on a huge file),
+    // reload instead of leaving a blank window. Give up after three crashes in
+    // a minute so a crash loop cannot spin forever.
+    connect(page, &QWebEnginePage::renderProcessTerminated, this, [this](QWebEnginePage::RenderProcessTerminationStatus status, int) {
+        if (status == QWebEnginePage::NormalTerminationStatus) return;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        m_crashes.append(now);
+        while (!m_crashes.isEmpty() && now - m_crashes.first() > 60000) m_crashes.removeFirst();
+        if (m_crashes.size() > 3) {
+            qCritical("omamap: the page keeps crashing; not reloading.");
+            return;
+        }
+        m_ready = false;
+        m_recovered = true;
+        QTimer::singleShot(500, this, [this] { load(QUrl(QStringLiteral("%1://%2/index.html").arg(SchemeHandler::Scheme, SchemeHandler::Host))); });
+    });
     connect(theme, &ThemeWatcher::changed, this, [this, page] {
         page->setBackgroundColor(QColor(m_theme->background()));
         pushTheme();
@@ -182,7 +204,8 @@ void Window::selfTest()
         "JSON.stringify({worker: !!Parser.worker && !Parser.failed, mode: STATE.mode, basemap: STATE.basemapId,"
         " bg: getComputedStyle(document.body).backgroundColor, font: getComputedStyle(document.body).fontFamily,"
         " datasets: STATE.datasets.map(function (d) { return d.name + ':' + d.featureCount; }),"
-        " errors: Array.from(document.querySelectorAll('.toast.err')).map(function (t) { return t.textContent; })})");
+        " errors: Array.from(document.querySelectorAll('.toast.err')).map(function (t) { return t.textContent; }),"
+        " notices: Array.from(document.querySelectorAll('.toast')).map(function (t) { return t.firstChild.textContent; })})");
     page()->runJavaScript(js, [this](const QVariant &result) {
         printf("%s\n", result.toString().toUtf8().constData());
         fflush(stdout);

@@ -130,7 +130,20 @@
     });
   }
 
-  function copyJsonValue(value, depth, budget) {
+  // Shapefile date fields arrive as Date objects; keep them as plain text. An
+  // empty DBF date ("00000000") decodes to 1899-11-30, so that means no date.
+  function dateText(d) {
+    if (isNaN(d.getTime())) return null;
+    if (d.getFullYear() === 1899 && d.getMonth() === 10 && d.getDate() === 30) return null;
+    const pad = function (n) { return String(n).padStart(2, "0"); };
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+  }
+
+  /* Check a property value in place: JSON types only, finite numbers, bounded
+     strings and nesting, and no prototype-pollution key anywhere. Returns the
+     value to store (only Dates are replaced). Not copying keeps peak memory
+     close to the parsed size, which matters for large files. */
+  function checkJsonValue(value, depth, budget) {
     if (depth > 20) throw new Error("Nested property depth exceeds 20.");
     if (value === null || typeof value === "boolean") return value;
     if (typeof value === "number") {
@@ -142,42 +155,60 @@
       budget.bytes += value.length * 2;
       return value;
     }
-    if (Array.isArray(value)) return value.map(function (item) { return copyJsonValue(item, depth + 1, budget); });
-    if (typeof value === "object") {
-      const out = {};
+    if (value instanceof Date) return dateText(value);
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) value[i] = checkJsonValue(value[i], depth + 1, budget);
+      return value;
+    }
+    if (typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
       const keys = Object.keys(value);
       if (keys.length > LIMITS.propertiesPerFeature) throw new Error("An object has too many properties.");
-      keys.forEach(function (key) {
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
         if (FORBIDDEN_PROPERTY_NAMES.indexOf(key) >= 0) throw new Error("Rejected unsafe property name: " + key);
-        out[key] = copyJsonValue(value[key], depth + 1, budget);
-      });
-      return out;
+        if (key.length > LIMITS.propertyString) throw new Error("A property name is too long.");
+        const v = value[key];
+        const checked = checkJsonValue(v, depth + 1, budget);
+        if (checked !== v) value[key] = checked;
+      }
+      return value;
     }
     throw new Error("Properties may contain only JSON values.");
   }
 
-  /* Normalise any GeoJSON input into a validated FeatureCollection copy with
-     own-property objects only. Throws on any structural problem. */
+  // The validated geometry, reduced to its GeoJSON members. Coordinate arrays
+  // are reused, not copied.
+  function cleanGeometry(g) {
+    if (g.type === "GeometryCollection") return { type: g.type, geometries: g.geometries.map(cleanGeometry) };
+    return { type: g.type, coordinates: g.coordinates };
+  }
+
+  /* Normalise any GeoJSON input into a validated FeatureCollection. Features
+     are rebuilt with only type, geometry, properties and id; property objects
+     are checked in place. Throws on any structural problem. */
   function validateFeatureCollection(input) {
     const fc = normalizeToFeatureCollection(input);
     if (fc.features.length > LIMITS.features) throw new Error("Dataset exceeds the " + LIMITS.features.toLocaleString() + " feature limit.");
     const counter = { count: 0 };
     const budget = { bytes: 0 };
-    const features = fc.features.map(function (feature, index) {
+    const features = new Array(fc.features.length);
+    for (let index = 0; index < fc.features.length; index++) {
+      const feature = fc.features[index];
       if (!feature || typeof feature !== "object" || feature.type !== "Feature") throw new Error("Feature " + index + " is invalid.");
       validateGeometry(feature.geometry, counter, 0);
-      if (feature.properties !== undefined && feature.properties !== null && (typeof feature.properties !== "object" || Array.isArray(feature.properties))) throw new Error("Feature properties must be a JSON object.");
+      const props = feature.properties;
+      if (props !== undefined && props !== null && (typeof props !== "object" || Array.isArray(props))) throw new Error("Feature properties must be a JSON object.");
       const output = {
         type: "Feature",
-        geometry: copyJsonValue(feature.geometry, 0, budget),
-        properties: copyJsonValue(feature.properties == null ? {} : feature.properties, 0, budget)
+        geometry: cleanGeometry(feature.geometry),
+        properties: props == null ? {} : checkJsonValue(props, 0, budget)
       };
       if (Object.prototype.hasOwnProperty.call(feature, "id") && feature.id != null) {
         if (!(typeof feature.id === "string" || (typeof feature.id === "number" && Number.isSafeInteger(feature.id)))) throw new Error("Feature IDs must be strings or safe integers.");
         output.id = feature.id;
       }
-      return output;
-    });
+      features[index] = output;
+    }
     if (budget.bytes > LIMITS.propertyBytes) throw new Error("Dataset attribute data exceeds the size budget.");
     if (!features.length) throw new Error("Dataset contains no features.");
     return { type: "FeatureCollection", features: features, coordinateCount: counter.count };
