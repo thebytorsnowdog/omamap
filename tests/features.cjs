@@ -239,6 +239,13 @@ function fixtures(dir) {
       return { x: r.left + p.x, y: r.top + p.y };
     });
     await page.mouse.click(pt.x, pt.y);
+    // The click switches the table to "sites" and redraws it asynchronously;
+    // wait for the redraw so we don't read the stale assets row selected by
+    // the previous arrow-key test.
+    await page.waitForFunction(() => {
+      const c = document.querySelectorAll(".tp-row.selected .tp-cell");
+      return c.length > 1 && c[1].textContent === "Site 0";
+    }, null, { timeout: 5000 });
     assert.match(await page.locator("#tp-dataset option:checked").textContent(), /^sites/);
     assert.equal(await page.locator(".tp-row.selected").count(), 1);
     assert.equal(await page.locator(".tp-row.selected .tp-cell").nth(1).textContent(), "Site 0");
