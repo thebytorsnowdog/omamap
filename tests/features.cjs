@@ -321,12 +321,8 @@ function fixtures(dir) {
     await page.evaluate(() => clearAll());
     const a = await makeFile("first.geojson", 50000), b = await makeFile("second.geojson", 10);
     const order = await page.evaluate(async ([a, b]) => {
-      const seen = [];
-      const orig = window.addDataset;
-      window.addDataset = function (p) { seen.push(p.name); return orig(p); };
       await Promise.all([handleFiles([a]), handleFiles([b])]);
-      window.addDataset = orig;
-      return { seen: seen, spinnerHidden: document.getElementById("loading").hidden };
+      return { seen: STATE.datasets.map(d => d.name), spinnerHidden: document.getElementById("loading").hidden };
     }, [a, b]);
     assert.deepEqual(order.seen, ["first", "second"]);
     assert.equal(order.spinnerHidden, true);
@@ -427,6 +423,69 @@ function fixtures(dir) {
     assert.equal(r.live, 8);
     assert.equal(r.reused, true);
     assert.equal(r.after, 0, "contexts released after clearing");
+  });
+
+  await check("late fields, object labels and removed table data stay correct", async () => {
+    const result = await page.evaluate(() => {
+      clearAll();
+      const features = Array.from({length:5001}, () => ({type:"Feature",geometry:{type:"Point",coordinates:[0,0]},properties:{}}));
+      features[5000].properties.late = "present";
+      features[0].properties.name = {toString:null,valueOf:null};
+      const ds = addDataset({name:"regression",geojson:OmaParse.validateFeatureCollection({type:"FeatureCollection",features})});
+      Table.open(ds); Table.choose(0,false);
+      const late = Table.columns.some(c => c.field === "late");
+      const label = el("insp-ds").textContent;
+      Table.close(); removeDataset(ds.id);
+      return {late,label,last:Table.last,ds:Table.ds,order:Table.order,cache:ds.rowText};
+    });
+    assert.equal(result.late,true);
+    assert.equal(result.label,'{"toString":null,"valueOf":null}');
+    assert.equal(result.last,null); assert.equal(result.ds,null); assert.equal(result.order,null); assert.equal(result.cache,null);
+  });
+
+  await check("mixed datasets keep fast points and reuse GPU uploads while navigating", async () => {
+    const result = await page.evaluate(async () => {
+      clearAll();
+      const features = Array.from({length:1200}, (_,i) => ({type:"Feature",properties:{id:i},geometry:{type:"Point",coordinates:[-3+i*0.0000001,56]}}));
+      features.push({type:"Feature",properties:{},geometry:{type:"Polygon",coordinates:[[[-3.01,55.99],[-2.99,55.99],[-2.99,56.01],[-3.01,56.01],[-3.01,55.99]]]}});
+      const ds = addDataset({name:"mixed",geojson:{type:"FeatureCollection",features}});
+      STATE.map.setView([56,-3],22,{animate:false});
+      const frame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      await frame();
+      const group=ds.layers[0]._group, gl=group._gl;
+      if (!gl) throw new Error("WebGL unavailable in mixed rendering regression");
+      const center=STATE.map.latLngToLayerPoint([56,-3]);
+      const x=Math.round((center.x-group._pxBounds.min.x)*(devicePixelRatio||1));
+      const y=group._canvas.height-1-Math.round((center.y-group._pxBounds.min.y)*(devicePixelRatio||1));
+      group._draw(); // read before the non-preserved WebGL buffer is presented
+      const pixel=new Uint8Array(4); gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+      const hits=identify(center).length;
+      let uploads=0;
+      const data=gl.bufferData.bind(gl), sub=gl.bufferSubData.bind(gl);
+      gl.bufferData=(...args)=>{uploads++;return data(...args)};
+      gl.bufferSubData=(...args)=>{uploads++;return sub(...args)};
+      STATE.map.panBy([15,0],{animate:false}); await frame();
+      STATE.map.setZoom(21,{animate:false}); await frame();
+      const fast=ds.layers.slice(0,1200).every(l=>l.isFastPoint);
+      const live=FastPoints.glLive;
+      clearAll();
+      return {fast,uploads,alpha:pixel[3],hits,live,after:FastPoints.glLive};
+    });
+    assert.equal(result.fast,true); assert.equal(result.uploads,0);
+    assert.ok(result.alpha>150,'split GPU coordinates stay accurate at zoom 22');
+    assert.ok(result.hits>1); assert.ok(result.live>0); assert.equal(result.after,0);
+  });
+
+  await check("an old asynchronous table search cannot restore removed data", async () => {
+    const result=await page.evaluate(async()=>{
+      clearAll();
+      const features=Array.from({length:20000},(_,i)=>({type:"Feature",geometry:{type:"Point",coordinates:[0,0]},properties:{id:i,name:"row "+i}}));
+      const ds=addDataset({name:"table cancellation",geojson:{type:"FeatureCollection",features}});
+      Table.open(ds); Table.query="row"; const pending=Table.refilter();
+      clearAll(); await pending;
+      return {last:Table.last,ds:Table.ds,order:Table.order};
+    });
+    assert.deepEqual(result,{last:null,ds:null,order:null});
   });
 
   await check("no page errors", async () => { assert.deepEqual(errors, []); });

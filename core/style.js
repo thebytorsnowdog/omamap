@@ -63,11 +63,12 @@ function propOf(properties, field) {
 
 function isMissing(v) { return v === null || v === undefined || (typeof v === "string" && v.trim() === ""); }
 
-/* Property names, in first-seen order, from a sample of features. */
+/* Validation normally supplies the complete schema. The fallback also visits
+   every feature: late fields must remain available in tables and styling. */
 function datasetFields(ds) {
   if (ds.fields) return ds.fields;
   const seen = new Set();
-  const n = Math.min(ds.features.length, FIELD_SAMPLE);
+  const n = ds.features.length;
   for (let i = 0; i < n; i++) {
     const p = ds.features[i].properties;
     for (const k in p) if (Object.prototype.hasOwnProperty.call(p, k)) seen.add(k);

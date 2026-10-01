@@ -29,12 +29,13 @@ All parsing and validation is in `core/parse.js`, which descends from WIMP's sec
 - **Validation before display.** GeoJSON is checked structurally: geometry types, finite WGS84 coordinates, closed rings, and bounded GeometryCollection nesting. Features are rebuilt with only `type`, `geometry`, `properties` and `id`. Attribute values must be JSON values (string, number, boolean, null, array, plain object), and nesting is limited to 20 levels.
 - **Prototype pollution.** Attribute and CSV header names `__proto__`, `prototype` and `constructor` are rejected at any depth. The interface reads attribute values only as an object's own properties, so a field called `toString` never shows `Object.prototype` members as values.
 - **Resource limits.** 100 MiB per file. 500,000 features, 5 million coordinates, 1,000 distinct attribute names and 500 attributes per object per dataset. 10 million values per CSV or shapefile table. 100,000 characters per value. 50 datasets. Limits are enforced as early as possible:
-  - CSV is parsed in 1 MiB chunks and stops one row past the limit.
+  - CSV delimiter detection uses at most 64 KiB. An allocation-free scan checks record width, cell length, row count and total cells before the full parser runs; quoted newlines and escaped quotes are handled. Parsing then uses 1 MiB chunks.
   - Shapefile `.shp` record headers and `.dbf` headers are checked against the file size before the shapefile library reads them.
   - KML and GPX placemarks and tracks are counted in the text before a DOM is built.
   - Nested arrays of GeoJSON layers are depth-limited.
 - **ZIP archives.** Archives may be at most 50 MiB, expand to at most 250 MiB with a compression ratio of at most 100, and hold at most 500 entries and 50 layers, with at most 1,000,000 features across all layers. Before anything is decompressed, the central directory and local headers must agree and entries must tile the archive exactly, with no overlaps or hidden data. Names must be safe: no absolute paths, `..`, backslashes or control characters. Encrypted, multi-disk and ZIP64 archives are refused, and data descriptors must match the central directory. Each entry is inflated once, in bounded steps, and its size and CRC-32 are checked. Nothing is ever written to disk.
 - **XML.** KML and GPX with a `DOCTYPE` or `ENTITY` declaration are refused, so entity expansion and external entities are impossible. Chromium's `DOMParser` never fetches external resources.
+- **Workspace budget.** Admission checks across all loaded datasets cap the workspace at 1,000,000 features, 10,000,000 coordinates and 512 MiB of estimated data/rendering structures. This is not an operating-system memory cap; Chromium, GPU memory, transient parsing and allocator overhead are additional. Table search-text caches are bounded to 16 MiB per dataset and cleared on removal.
 - **Profiles.** Every dataset in a profile goes through the same validation. Colours must be `#rrggbb`, numbers are clamped to their ranges, and enumerations come from fixed lists. The basemap must be one OmaMap knows. The view must be finite and in range. Names are plain text of bounded length.
 
 ### Displaying untrusted data
@@ -76,7 +77,7 @@ If no private runtime directory is available, every launch opens its own window.
 | `~/.config/omamap/omamap.conf` | Folder a profile was last saved to | Your config directory |
 | `~/.local/share/omamap/` | Web storage: last map view, basemap, table height | Your data directory |
 | `~/.cache/omamap/` | HTTP cache of viewed basemap tiles (up to 512 MiB) | Your cache directory |
-| Profiles you save | A full copy of every open dataset | Where you choose |
+| Profiles you save | A full copy of every open dataset | Where you choose; mode 0600, completed in a private staging directory on the same filesystem and atomically renamed over the destination |
 
 No cookies are persisted. Opened files are never written or modified.
 
@@ -84,9 +85,13 @@ No cookies are persisted. Opened files are never written or modified.
 
 The widget (`omarchy-plugin/BarWidget.qml`) runs inside the Omarchy shell, without a sandbox. It reads `recent.json`, ignores any entry that is not an absolute path or that contains control characters, and opens files with an argument vector, `omamap -- <path>`. No shell is involved, so nothing in a file name (quotes, `$(…)`, backticks, leading dashes) is interpreted. `omarchy plugin add` clones the whole repository, but the shell loads only the entry point named in `manifest.json`. The `omarchy-plugin/` directory contains nothing else, and no other file in the repository runs on plugin load. Installing or updating the plugin means trusting this repository's code to run in your desktop shell, as with any Omarchy plugin.
 
+Profile serialization runs in short batches and counts UTF-8 bytes against the 100 MiB import limit. An oversized export fails before starting a download. Failed downloads or replacement failures preserve the existing destination. An interrupted process may leave a private `.omamap-save-*` staging directory beside the destination; it can be removed once OmaMap is closed.
+
 ### Supply chain and packaging
 
 The five web libraries are vendored: Leaflet 1.9.4, shpjs 6.2.0 (with proj4 and but-unzip), fflate 0.8.3, PapaParse 5.4.1 and @tmcw/togeojson 5.1.2. Their SHA-256 hashes are pinned in `core/vendor/SHA256SUMS`, and they match WIMP's reviewed dependency lock. The test suite and the PKGBUILD's `check()` both verify them. The build downloads nothing. The PKGBUILD builds the working tree it sits in, including uncommitted changes.
+
+GitHub CI runs parser/vendor tests, browser/security tests, a Qt native build, native save regressions and host smoke tests. GitHub Actions dependencies are pinned to commit hashes. A separate weekly workflow checks the vendored files against official npm releases and queries GitHub advisories, including package-wide checks for the embedded libraries whose exact versions shpjs does not record. This online monitoring is separate from the offline application build.
 
 ## What leaves your machine
 
@@ -96,7 +101,7 @@ The five web libraries are vendored: Leaflet 1.9.4, shpjs 6.2.0 (with proj4 and 
 
 ## Known limitations and residual risks
 
-- **Resource use within the limits.** A file inside every limit can still be large: 500,000 features, 5 million coordinates, 100 MiB of input. Several such files, up to 50 datasets, can use gigabytes of memory. If the page runs out of memory it is restarted, with a notice, and unsaved work is lost. Within the limits, files that are slow to parse can take a while. The Cancel button stops worker parsing.
+- **Resource use within the limits.** A file inside every limit can still be large: 500,000 features, 5 million coordinates, 100 MiB of input. The workspace admission budget limits aggregate data, but estimates do not include all transient copies, engine overhead or GPU allocations; actual memory can still exceed the estimate. If the page runs out of memory it is restarted, with a notice, and unsaved work is lost. Within the limits, files that are slow to parse can take a while. The Cancel button stops worker parsing and batched layer construction.
 - **KML and GPX parse on the main thread** and can't be cancelled. A large file within the limits can freeze the window for some seconds.
 - **Third-party parsers.** The shapefile reader (shpjs, with proj4 for `.prj` files), togeojson, fflate, PapaParse and Leaflet process untrusted input. OmaMap checks their inputs and outputs, but a bug in them could still crash parsing or the page. They are memory-safe JavaScript in a sandboxed renderer.
 - **Qt WebEngine (Chromium)** decodes the tile images and renders the page. Its security fixes come from your distribution's `qt6-webengine` package, so keep the system updated. A compromised tile server could send malicious images to Chromium's image decoders.

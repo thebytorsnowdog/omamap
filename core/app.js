@@ -250,21 +250,57 @@ function geometrySummary(geojson) {
   return Object.keys(set);
 }
 
+// The synchronous wrapper serves small programmatic additions; file imports
+// drive the same generator in short batches so painting and Cancel can run.
 function addDataset(parsed) {
+  const job = prepareDataset(parsed);
+  let step;
+  do { step = job.next(); } while (!step.done);
+  return step.value;
+}
+
+async function addDatasetAsync(parsed) {
+  const job = prepareDataset(parsed);
+  let started = performance.now();
+  while (true) {
+    if (cancelledLoad) { job.return(); throw new LoadCancelled("Loading cancelled."); }
+    const step = job.next();
+    if (step.done) return step.value;
+    if (performance.now() - started >= 8) {
+      await new Promise(resolve => setTimeout(resolve, 0)); started = performance.now();
+    }
+  }
+}
+
+function* prepareDataset(parsed) {
   if (STATE.datasets.length >= MAX_DATASETS) throw new Error("Dataset limit reached (" + MAX_DATASETS + "). Remove one first.");
-  const geojson = parsed.geojson;
-  let index = 0;
-  let layers = [];
-  // Point-only data uses the batched point renderer; everything else Leaflet's canvas.
-  let layer = fastPointsFor(geojson.features);
-  if (layer) layers = layer.getLayers();
-  else {
-    layer = L.geoJSON(geojson, {
-      renderer: STATE.renderer,
-      interactive: false,     // selection is done by our own hit-testing
-      pointToLayer: function (feature, latlng) { return L.circleMarker(latlng, { renderer: STATE.renderer, interactive: false }); },
-      onEachFeature: function (feature, lyr) { lyr._omaIndex = index++; layers.push(lyr); }
-    });
+  const geojson = parsed.geojson.estimatedBytes === undefined ? OmaParse.validateFeatureCollection(parsed.geojson) : parsed.geojson;
+  OmaParse.checkWorkspace(STATE.datasets.map(function (ds) { return ds.geojson; }).concat([geojson]));
+  const layers = new Array(geojson.features.length), points = [];
+  let featureIndex = 0;
+  const paths = L.geoJSON(null, {
+    renderer: STATE.renderer, interactive: false,
+    pointToLayer: function (feature, latlng) { return L.circleMarker(latlng, { renderer: STATE.renderer, interactive: false }); },
+    onEachFeature: function (feature, lyr) { lyr._omaIndex = featureIndex; layers[featureIndex] = lyr; }
+  });
+  for (let i = 0; i < geojson.features.length; i++) {
+    const f = geojson.features[i];
+    if (f.geometry.type === "Point") points.push({latlng:L.latLng(f.geometry.coordinates[1],f.geometry.coordinates[0]), feature:f, index:i});
+    else { featureIndex = i; paths.addData(f); }
+    if (i % 512 === 0) yield;
+  }
+  let layer = paths;
+  if (points.length) {
+    const fast = new FastPoints(points, {deferred:true});
+    for (let i = 0; i < points.length; i += 1024) {
+      fast.fillItems(points, i, Math.min(points.length,i+1024)); yield;
+    }
+    fast.getLayers().forEach(function (p) { layers[p._omaIndex] = p; });
+    if (points.length === geojson.features.length) layer = fast;
+    else {
+      layer = L.featureGroup([paths, fast]);
+      layer.dispose = function () { fast.dispose(); STATE.map.removeLayer(layer); };
+    }
   }
   const ds = {
     id: "ds-" + (STATE.nextId++),
@@ -272,6 +308,9 @@ function addDataset(parsed) {
     slot: STATE.nextSlot++,
     layer: layer,
     features: geojson.features,
+    geojson: geojson,
+    fields: geojson.fields,
+    spatial: new SpatialIndex(geojson.features),
     layers: layers,           // per feature, in file order
     featureCount: geojson.features.length,
     geomTypes: geometrySummary(geojson),
@@ -279,7 +318,11 @@ function addDataset(parsed) {
     warnings: parsed.warnings || []
   };
   ds.style = defaultStyle(ds);
-  applyDatasetStyle(ds);
+  const cache = new Map();
+  for (let i = 0; i < layers.length; i++) {
+    styleFeatureLayer(layers[i], ds, false, cache);
+    if (i % 1024 === 0) yield;
+  }
   layer.addTo(STATE.map);
   STATE.datasets.push(ds);
   return ds;
@@ -338,6 +381,7 @@ function removeDataset(id) {
 
 // Remove a dataset's layer from the map and free what it holds (GPU context).
 function disposeDataset(ds) {
+  Table.forget(ds);
   if (typeof ds.layer.dispose === "function") ds.layer.dispose();
   else STATE.map.removeLayer(ds.layer);
 }
@@ -464,11 +508,15 @@ function layerContains(layer, point) {
 
 function identify(layerPoint) {
   const hits = [];
+  // Include the largest point radius, selection halo and hit tolerance.
+  const a = STATE.map.layerPointToLatLng(layerPoint.subtract([26, 26]));
+  const b = STATE.map.layerPointToLatLng(layerPoint.add([26, 26]));
   for (let d = STATE.datasets.length - 1; d >= 0; d--) {
     const ds = STATE.datasets[d];
     if (!ds.visible) continue;
-    const layers = ds.layer.getLayers();
-    for (let i = layers.length - 1; i >= 0; i--) {
+    const layers = ds.layers;
+    const candidates = ds.spatial.search(a.lng, b.lat, b.lng, a.lat);
+    for (const i of candidates) {
       if (layerContains(layers[i], layerPoint)) hits.push({ ds: ds, layer: layers[i] });
     }
   }
@@ -616,7 +664,8 @@ function featureLabel(feature, index) {
   const p = (feature && feature.properties) || {};
   for (let i = 0; i < LABEL_KEYS.length; i++) {
     const v = p[LABEL_KEYS[i]];
-    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).slice(0, 80);
+    const text = v !== null && typeof v === "object" ? JSON.stringify(v) : (v == null ? "" : String(v));
+    if (text.trim() !== "") return text.slice(0, 80);
   }
   if (feature && feature.id != null) return String(feature.id);
   return "Feature " + ((index || 0) + 1);
@@ -848,6 +897,7 @@ async function parseShapefileSet(stem, group) {
 /* Accepts File objects (drop / picker) or host-supplied { name, size, arrayBuffer }.
    Batches load one after another, so a second drop waits for the first. */
 let loadQueue = Promise.resolve();
+let cancelledLoad = false;
 function handleFiles(fileList) {
   const files = Array.from(fileList || []).filter(Boolean);
   const run = loadQueue.then(function () { return loadFiles(files); });
@@ -856,6 +906,7 @@ function handleFiles(fileList) {
 }
 
 async function loadFiles(files) {
+  cancelledLoad = false;
   if (!files.length) return;
   if (files.length > MAX_FILES_PER_DROP) { toast("Too many files", "Add at most " + MAX_FILES_PER_DROP + " files at once.", "err"); return; }
 
@@ -890,12 +941,13 @@ async function loadFiles(files) {
       if (result && result.kind === "profile") {
         setLoading(false);
         if (STATE.datasets.length && !window.confirm("Open profile “" + jobs[i].label + "”?\n\nIt replaces the " + plural(STATE.datasets.length, "dataset") + " currently open.")) continue;
-        restoreProfile(result);
+        setLoading(true, "Opening profile…");
+        await restoreProfile(result);
         profileOpened = jobs[i].label;
         added.length = 0;
         continue;
       }
-      result.forEach(function (parsed) { added.push(addDataset(parsed)); });
+      for (const parsed of result) added.push(await addDatasetAsync(parsed));
     } catch (error) {
       if (error instanceof LoadCancelled) {
         toast("Loading cancelled", jobs.length - i > 1 ? "Skipped " + plural(jobs.length - i, "file") + "." : jobs[i].label, "warn");
@@ -957,11 +1009,15 @@ function profileFileName() {
   return "OmaMap " + d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + pad(d.getMinutes()) + ".omamap";
 }
 
-function saveProfile() {
+let savingProfile = false;
+async function saveProfile() {
+  if (savingProfile) return;
   if (!STATE.datasets.length) { toast("Nothing to save", "Open some datasets first.", "warn"); return; }
   let blob;
-  try { blob = new Blob([JSON.stringify(buildProfile())], { type: "application/x-omamap-profile" }); }
+  savingProfile = true;
+  try { blob = await OmaParse.profileBlob(buildProfile()); }
   catch (e) { toast("Could not save", OmaParse.safeMessage(e), "err"); return; }
+  finally { savingProfile = false; }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = profileFileName();
@@ -973,15 +1029,15 @@ function saveProfile() {
   if (!STATE.host) toast("Profile saved", a.download + " (" + plural(STATE.datasets.length, "dataset") + ")", "ok");
 }
 
-function restoreProfile(profile) {
+async function restoreProfile(profile) {
   clearSelection();
   STATE.datasets.slice().forEach(disposeDataset);
   STATE.datasets = [];
   STATE.nextSlot = 0;
   STATE.styleOpenId = null;
   const added = [];
-  profile.datasets.forEach(function (saved) {
-    const ds = addDataset({ name: saved.name, geojson: saved.geojson, warnings: saved.warnings });
+  for (const saved of profile.datasets) {
+    const ds = await addDatasetAsync({ name: saved.name, geojson: saved.geojson, warnings: saved.warnings });
     if (Number.isInteger(saved.slot) && saved.slot >= 0) ds.slot = saved.slot;
     const st = saved.style || {};
     ["colour", "fillOpacity", "weight", "radius", "outline"].forEach(function (k) { if (st[k] !== null && st[k] !== undefined) ds.style[k] = st[k]; });
@@ -992,7 +1048,7 @@ function restoreProfile(profile) {
     applyDatasetStyle(ds);
     if (saved.visible === false) { ds.visible = false; STATE.map.removeLayer(ds.layer); }
     added.push(ds);
-  });
+  }
   STATE.nextSlot = STATE.datasets.reduce(function (m, d) { return Math.max(m, d.slot + 1); }, 0);
   if (profile.basemap && (profile.basemap === "auto" || OMAMAP_BASEMAPS.some(function (b) { return b.id === profile.basemap; }))) setBasemap(profile.basemap, true);
   if (profile.view) STATE.map.setView([profile.view.lat, profile.view.lng], profile.view.zoom);
@@ -1124,7 +1180,7 @@ function boot() {
   Table.wire();
   el("btn-open").addEventListener("click", function () { el("file-input").click(); });
   el("btn-save").addEventListener("click", saveProfile);
-  el("loading-cancel").addEventListener("click", function () { Parser.cancel(); });
+  el("loading-cancel").addEventListener("click", function () { cancelledLoad = true; Parser.cancel(); });
   el("layer-empty").addEventListener("click", function () { el("file-input").click(); });
   el("file-input").addEventListener("change", function () { const files = Array.from(this.files || []); this.value = ""; handleFiles(files); });
   el("btn-fit-all").addEventListener("click", fitAll);

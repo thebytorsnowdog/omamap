@@ -1,0 +1,33 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    name: OmaMap checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container: archlinux:base-devel
+    env:
+      # The disposable container runs as root. This is only for CI; the
+      # installed application never disables the WebEngine sandbox.
+      QTWEBENGINE_DISABLE_SANDBOX: '1'
+    steps:
+      - name: Install build and test dependencies
+        run: pacman -Syu --noconfirm --needed git cmake qt6-base qt6-webengine nodejs npm chromium jq python
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run test:browser
+      - run: cmake -S host -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure
+      - run: tests/host-smoke.sh

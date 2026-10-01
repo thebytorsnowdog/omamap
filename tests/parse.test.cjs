@@ -405,3 +405,57 @@ test("a CSV with more than 10 million cells is refused before features are built
   const row = "1" + ",1".repeat(499);
   assert.throws(() => P.csvToGeoJSON(header + "\n" + (row + "\n").repeat(20001)), /more than 10,000,000 cells/);
 });
+
+test("CSV preflight rejects wide rows before unbounded parsing", () => {
+  const original = Papa.parse;
+  let largest = 0;
+  Papa.parse = (text, options) => { largest = Math.max(largest, text.length); return original(text, options); };
+  try {
+    assert.throws(() => P.csvToGeoJSON('x,'.repeat(2000000) + 'x\n1,2'), /columns/);
+    assert.ok(largest <= 65536, 'only the bounded delimiter sample reaches Papa');
+  } finally { Papa.parse = original; }
+});
+
+test("CSV preflight handles other delimiters, escaped quotes and CRLF", () => {
+  for (const sep of [';', '\t', '|']) {
+    const fc = P.csvToGeoJSON(['lat','lon','note'].join(sep) + '\r\n' + ['1','2','"a\r\nb""c"'].join(sep));
+    assert.equal(fc.features[0].properties.note, 'a\r\nb"c');
+  }
+});
+
+test("validation returns fields first appearing after row 5000", () => {
+  const input = JSON.parse(POINT_FC);
+  input.features = Array.from({length:5001}, () => JSON.parse(POINT_FC).features[0]);
+  input.features[5000].properties.late = 1;
+  assert.deepEqual(P.validateFeatureCollection(input).fields, ['name','late']);
+});
+
+test("profile export preserves palette slots and UTF-8 data", async () => {
+  const profile = {omamap:'profile',version:1,datasets:[{name:'Édimbourg 🗺',slot:8,geojson:JSON.parse(POINT_FC)}]};
+  const blob = await P.profileBlob(profile);
+  const parsed = await P.parseBytes('roundtrip.omamap', await blob.arrayBuffer());
+  assert.equal(parsed.datasets[0].slot,8);
+  assert.equal(parsed.datasets[0].name,profile.datasets[0].name);
+  assert.deepEqual(JSON.parse(await blob.text()),profile);
+});
+
+test("oversized profile export fails instead of creating an unreadable save", async () => {
+  const f = JSON.parse(POINT_FC).features[0];
+  f.properties.text = 'x'.repeat(95000);
+  const profile = {omamap:'profile',version:1,datasets:[{geojson:{type:'FeatureCollection',features:Array(1200).fill(f)}}]};
+  await assert.rejects(P.profileBlob(profile), /100 MiB reopening limit/);
+});
+
+test("workspace limits count all datasets together", () => {
+  const fc = P.validateFeatureCollection(JSON.parse(POINT_FC));
+  assert.ok(fc.estimatedBytes > 0);
+  assert.doesNotThrow(() => P.checkWorkspace([fc,fc]));
+  assert.throws(() => P.checkWorkspace([{features:{length:500001},coordinateCount:1,estimatedBytes:1},{features:{length:500000},coordinateCount:1,estimatedBytes:1}]), /Workspace memory budget/);
+  assert.throws(() => P.checkWorkspace([{features:[],coordinateCount:10000001,estimatedBytes:1}]), /Workspace memory budget/);
+  assert.throws(() => P.checkWorkspace([{features:[],coordinateCount:0,estimatedBytes:P.LIMITS.workspaceBytes},{features:[],coordinateCount:0,estimatedBytes:1}]), /Workspace memory budget/);
+});
+
+test("CSV preflight accepts a UTF-8 BOM before quoted headers", () => {
+  const fc = P.csvToGeoJSON('\ufeff"lat","lon","note"\n1,2,"a,b"');
+  assert.equal(fc.features[0].properties.note,'a,b');
+});

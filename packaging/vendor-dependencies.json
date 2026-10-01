@@ -1,0 +1,10 @@
+{
+  "libraries": [
+    {"package":"leaflet","version":"1.9.4","files":{"leaflet.js":"package/dist/leaflet.js","leaflet.css":"package/dist/leaflet.css"}},
+    {"package":"shpjs","version":"6.2.0","files":{"shp.js":"package/dist/shp.js"}},
+    {"package":"fflate","version":"0.8.3","files":{"fflate.js":"package/umd/index.js"}},
+    {"package":"papaparse","version":"5.4.1","files":{"papaparse.min.js":"package/papaparse.min.js"}},
+    {"package":"@tmcw/togeojson","version":"5.1.2","files":{"togeojson.umd.js":"package/dist/togeojson.umd.js"}}
+  ],
+  "bundledWithoutExactVersion": ["proj4", "parsedbf", "but-unzip"]
+}
