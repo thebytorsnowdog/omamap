@@ -78,8 +78,14 @@ void SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
             job->fail(QWebEngineUrlRequestJob::RequestDenied);
             return;
         }
+        // Still a regular file: a FIFO or device swapped in since it was
+        // opened would block or never end.
+        if (target.isEmpty() || !QFileInfo(target).isFile()) {
+            job->fail(QWebEngineUrlRequestJob::UrlNotFound);
+            return;
+        }
         auto *file = new QFile(target, job);
-        if (target.isEmpty() || !file->open(QIODevice::ReadOnly)) {
+        if (!file->open(QIODevice::ReadOnly)) {
             job->fail(QWebEngineUrlRequestJob::UrlNotFound);
             return;
         }
