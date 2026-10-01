@@ -216,6 +216,25 @@ function fixtures() {
     assert.ok(r.toasts.every((t) => /too large/.test(t)), JSON.stringify(r.toasts));
   });
 
+  await check("KML or GPX with too many features is refused before it is parsed", async () => {
+    // KML/GPX parse on the main thread; this one used to freeze the window
+    // for seconds (a minute at 100 MiB) before the feature limit applied.
+    const r = await page.evaluate(async () => {
+      const placemark = "<Placemark><Point><coordinates>1,1</coordinates></Point></Placemark>";
+      const kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>' + placemark.repeat(500001) + "</Document></kml>";
+      const gpx = '<?xml version="1.0"?><gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">' + '<wpt lat="1" lon="1"/>'.repeat(500001) + "</gpx>";
+      const out = [];
+      for (const [text, ext] of [[kml, "kml"], [gpx, "gpx"]]) {
+        const t = performance.now();
+        try { OmaParse.xmlToGeoJSON(text, ext); out.push("accepted"); }
+        catch (e) { out.push(e.message); }
+        out.push(performance.now() - t < 3000);
+      }
+      return out;
+    });
+    assert.deepEqual(r, ["File has more than 500,000 placemarks.", true, "File has more than 500,000 waypoints, tracks and routes.", true]);
+  });
+
   await check("only basemap tile hosts were contacted", async () => {
     const hosts = Array.from(new Set(requests.map((u) => new URL(u).host)));
     assert.deepEqual(hosts.filter((h) => !TILE_HOSTS.includes(h)), []);

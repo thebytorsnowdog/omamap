@@ -435,8 +435,20 @@
   /* --------------------------- KML / GPX --------------------------------- */
   // Main thread only: needs DOMParser and toGeoJSON.
 
+  function countMatches(text, pattern) {
+    let n = 0;
+    pattern.lastIndex = 0;
+    while (pattern.exec(text)) n++;
+    return n;
+  }
+
   function xmlToGeoJSON(text, ext) {
     if (/<!DOCTYPE|<!ENTITY/i.test(String(text))) throw new Error("XML with a DOCTYPE or ENTITY declaration is not accepted.");
+    // This runs on the main thread and can't be cancelled, so refuse files
+    // with too many features before building a DOM for them (a 100 MiB KML
+    // of placemarks froze the window for about a minute, only to be refused).
+    const items = ext === "kml" ? countMatches(text, /<(?:\w+:)?Placemark[\s>]/g) : countMatches(text, /<(?:\w+:)?(?:wpt|trk|rte)[\s>]/g);
+    if (items > LIMITS.features) throw new Error("File has more than " + LIMITS.features.toLocaleString() + (ext === "kml" ? " placemarks." : " waypoints, tracks and routes."));
     const doc = new root.DOMParser().parseFromString(text, "text/xml");
     if (doc.getElementsByTagName("parsererror").length) throw new Error("File is not valid " + ext.toUpperCase() + " XML.");
     const geojson = ext === "kml" ? root.toGeoJSON.kml(doc) : root.toGeoJSON.gpx(doc);
