@@ -3,12 +3,19 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QMimeDatabase>
+#include <QMultiMap>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QUrl>
 #include <QWebEngineUrlRequestInfo>
 #include <QWebEngineUrlRequestJob>
 #include <QWebEngineUrlScheme>
+
+const QByteArray SchemeHandler::ContentSecurityPolicy =
+    "default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self'; "
+    "img-src 'self' data: https://tile.openstreetmap.org https://server.arcgisonline.com "
+    "https://a.tile.opentopomap.org https://b.tile.opentopomap.org https://c.tile.opentopomap.org; "
+    "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'";
 
 SchemeHandler::SchemeHandler(const QString &coreDir, QObject *parent)
     : QWebEngineUrlSchemeHandler(parent)
@@ -30,7 +37,10 @@ void SchemeHandler::registerScheme()
 
 QString SchemeHandler::shareFile(const QString &absolutePath)
 {
-    const QString token = QString::number(m_nextToken++);
+    // Unguessable, so a URL for one opened file says nothing about others.
+    quint32 words[4];
+    QRandomGenerator::system()->fillRange(words);
+    const QString token = QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(words), sizeof words).toHex());
     m_files.insert(token, absolutePath);
     const QString name = QString::fromUtf8(QUrl::toPercentEncoding(QFileInfo(absolutePath).fileName()));
     return QStringLiteral("%1://%2/file/%3/%4").arg(Scheme, Host, token, name);
@@ -58,16 +68,26 @@ void SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
     }
     const QString path = url.path(QUrl::FullyDecoded);
 
-    // Opened files: omamap://app/file/<token>/<name>
-    static const QRegularExpression fileRoute(QStringLiteral("^/file/(\\d+)/"));
+    // Opened files: omamap://app/file/<token>/<name>, for the app's own page only.
+    static const QRegularExpression fileRoute(QStringLiteral("^/file/([0-9a-f]{32})/"));
     const auto match = fileRoute.match(path);
     if (match.hasMatch()) {
         const QString target = m_files.value(match.captured(1));
+        const QUrl from = job->initiator();
+        if (from.scheme() != QLatin1String(Scheme) || from.host() != QLatin1String(Host)) {
+            job->fail(QWebEngineUrlRequestJob::RequestDenied);
+            return;
+        }
         auto *file = new QFile(target, job);
         if (target.isEmpty() || !file->open(QIODevice::ReadOnly)) {
             job->fail(QWebEngineUrlRequestJob::UrlNotFound);
             return;
         }
+        // Data, never a document: if anything navigated here it could not run.
+        job->setAdditionalResponseHeaders({
+            {"Content-Security-Policy", "sandbox; default-src 'none'"},
+            {"X-Content-Type-Options", "nosniff"},
+        });
         job->reply("application/octet-stream", file);
         return;
     }
@@ -75,7 +95,7 @@ void SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
     // Web core files, confined to the core directory.
     QString rel = path == QLatin1String("/") ? QStringLiteral("index.html") : path.mid(1);
     const QString full = QFileInfo(QDir(m_coreDir).filePath(rel)).canonicalFilePath();
-    if (full.isEmpty() || !full.startsWith(m_coreDir + QLatin1Char('/')) || !QFileInfo(full).isFile()) {
+    if (m_coreDir.isEmpty() || full.isEmpty() || !full.startsWith(m_coreDir + QLatin1Char('/')) || !QFileInfo(full).isFile()) {
         job->fail(QWebEngineUrlRequestJob::UrlNotFound);
         return;
     }
@@ -84,6 +104,11 @@ void SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
         job->fail(QWebEngineUrlRequestJob::UrlNotFound);
         return;
     }
+    job->setAdditionalResponseHeaders({
+        {"Content-Security-Policy", ContentSecurityPolicy},
+        {"X-Content-Type-Options", "nosniff"},
+        {"Referrer-Policy", "strict-origin-when-cross-origin"},
+    });
     job->reply(mimeFor(full), file);
 }
 

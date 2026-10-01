@@ -15,8 +15,15 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QStandardPaths>
+#include <QUrl>
 #include <QWebEngineProfile>
+
+#ifdef Q_OS_LINUX
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 static QString coreDirectory()
 {
@@ -36,27 +43,60 @@ static QString coreDirectory()
     return {};
 }
 
-// One running window per user. OMAMAP_INSTANCE names a separate channel, so
-// tests (or a second profile) never hand files to the user's own window.
-static QString socketName()
+// One running window per user. The socket lives in the user's private
+// runtime directory ($XDG_RUNTIME_DIR, mode 0700), not in /tmp where another
+// local user could create it first and receive the paths of files this user
+// opens. OMAMAP_INSTANCE names a separate channel, so tests (or a second
+// profile) never hand files to the user's own window. Empty if there is no
+// usable runtime directory: every launch then opens its own window.
+static QString socketPath()
 {
-    QString name = QStringLiteral("omamap-%1").arg(qEnvironmentVariable("USER", QStringLiteral("user")));
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    if (dir.isEmpty()) return {};
+    QString name = QStringLiteral("omamap");
     const QString instance = qEnvironmentVariable("OMAMAP_INSTANCE");
-    if (!instance.isEmpty()) name += QLatin1Char('-') + instance;
-    return name;
+    if (!instance.isEmpty()) {
+        static const QRegularExpression unsafe(QStringLiteral("[^A-Za-z0-9._-]"));
+        name += QLatin1Char('-') + QString(instance).replace(unsafe, QStringLiteral("_")).left(64);
+    }
+    return dir + QLatin1Char('/') + name + QStringLiteral(".sock");
 }
 
+// Messages are one file:// URL per line. Percent-encoding keeps a file name
+// containing a newline (legal on Linux) from turning into two paths.
+static constexpr qint64 MaxPendingBytes = 1024 * 1024;   // a line longer than this is not a path
+static constexpr int MaxPathsPerConnection = 1000;
+
 // Returns true if a running OmaMap accepted the files.
-static bool forwardToRunningInstance(const QStringList &files)
+static bool forwardToRunningInstance(const QString &path, const QStringList &files)
 {
+    if (path.isEmpty()) return false;
     QLocalSocket socket;
-    socket.connectToServer(socketName());
+    socket.connectToServer(path);
     if (!socket.waitForConnected(300)) return false;
-    socket.write((files.join(QLatin1Char('\n')) + QLatin1Char('\n')).toUtf8());
+    QByteArray message;
+    for (const QString &file : files) message += QUrl::fromLocalFile(file).toEncoded() + '\n';
+    if (message.isEmpty()) message = "\n";   // just raise the window
+    socket.write(message);
     socket.flush();
     socket.waitForBytesWritten(1000);
     socket.disconnectFromServer();
     return true;
+}
+
+// True if the connecting process runs as this user. The socket's directory
+// and mode already ensure that; this is a second check.
+static bool sameUser(QLocalSocket *client)
+{
+#ifdef Q_OS_LINUX
+    struct ucred cred {};
+    socklen_t length = sizeof cred;
+    if (getsockopt(int(client->socketDescriptor()), SOL_SOCKET, SO_PEERCRED, &cred, &length) != 0) return false;
+    return cred.uid == getuid();
+#else
+    Q_UNUSED(client);
+    return true;
+#endif
 }
 
 static void focusWindow()
@@ -99,7 +139,8 @@ int main(int argc, char *argv[])
         files << QFileInfo(path).absoluteFilePath();
     }
 
-    if (!parser.isSet(newInstance) && forwardToRunningInstance(files)) {
+    const QString socket = socketPath();
+    if (!parser.isSet(newInstance) && forwardToRunningInstance(socket, files)) {
         focusWindow();
         return 0;
     }
@@ -117,6 +158,7 @@ int main(int argc, char *argv[])
     profile->setHttpCacheMaximumSize(512 * 1024 * 1024);
     profile->setPersistentCookiesPolicy(QWebEngineProfile::NoPersistentCookies);
     profile->setSpellCheckEnabled(false);
+    profile->setPersistentPermissionsPolicy(QWebEngineProfile::PersistentPermissionsPolicy::AskEveryTime);
     auto *scheme = new SchemeHandler(core, &app);
     profile->installUrlSchemeHandler(SchemeHandler::Scheme, scheme);
     profile->setUrlRequestInterceptor(new RequestFilter(&app));
@@ -125,20 +167,28 @@ int main(int argc, char *argv[])
     Window window(profile, scheme, &theme);
 
     QLocalServer server;
-    if (!parser.isSet(newInstance)) {
-        QLocalServer::removeServer(socketName());   // clear a stale socket from a crash
+    if (!parser.isSet(newInstance) && !socket.isEmpty()) {
+        QLocalServer::removeServer(socket);   // clear a stale socket from a crash
         server.setSocketOptions(QLocalServer::UserAccessOption);
-        server.listen(socketName());
+        if (!server.listen(socket)) qWarning("omamap: cannot listen on %s: %s", qPrintable(socket), qPrintable(server.errorString()));
         QObject::connect(&server, &QLocalServer::newConnection, &window, [&server, &window] {
             while (QLocalSocket *client = server.nextPendingConnection()) {
                 QObject::connect(client, &QLocalSocket::disconnected, client, &QObject::deleteLater);
+                if (!sameUser(client)) { client->abort(); continue; }
                 QObject::connect(client, &QLocalSocket::readyRead, &window, [client, &window] {
-                    // Wait for complete lines; a partial path stays buffered.
+                    // Wait for complete lines; a partial line stays buffered, up to a limit.
                     QStringList paths;
+                    int received = client->property("paths").toInt();
                     while (client->canReadLine()) {
-                        const QString line = QString::fromUtf8(client->readLine()).trimmed();
-                        if (!line.isEmpty()) paths << line;
+                        const QByteArray line = client->readLine().trimmed();
+                        if (line.isEmpty() || received >= MaxPathsPerConnection) continue;
+                        const QUrl url = QUrl::fromEncoded(line, QUrl::StrictMode);
+                        if (!url.isLocalFile() || !QDir::isAbsolutePath(url.toLocalFile())) continue;
+                        paths << url.toLocalFile();
+                        received++;
                     }
+                    client->setProperty("paths", received);
+                    if (client->bytesAvailable() > MaxPendingBytes) { client->abort(); return; }
                     if (!paths.isEmpty()) window.openFiles(paths);
                     window.raise();
                     window.activateWindow();

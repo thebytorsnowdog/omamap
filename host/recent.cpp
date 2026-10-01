@@ -41,15 +41,27 @@ void add(const QString &path)
         {"time", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
     });
     for (const QJsonValue &v : std::as_const(entries)) {
-        const QString p = v.toObject().value("path").toString();
-        if (p.isEmpty() || p == absolute || !QFileInfo::exists(p)) continue;
+        // Carry earlier entries forward field by field, so whatever else the
+        // file held is not repeated.
+        const QJsonObject e = v.toObject();
+        const QString p = e.value("path").toString();
+        if (p.isEmpty() || !QDir::isAbsolutePath(p) || p == absolute || !QFileInfo::exists(p)) continue;
         if (kept.size() >= MaxEntries) break;
-        kept.append(v);
+        kept.append(QJsonObject{
+            {"path", p},
+            {"name", QFileInfo(p).fileName()},
+            {"kind", e.value("kind").toString() == QLatin1String("profile") ? "profile" : "data"},
+            {"time", e.value("time").toString().left(40)},
+        });
     }
 
-    QDir().mkpath(QFileInfo(filePath()).absolutePath());
+    // The list names files the user opened: keep it private to them.
+    const QString dir = QFileInfo(filePath()).absolutePath();
+    QDir().mkpath(dir);
+    QFile::setPermissions(dir, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
     QSaveFile out(filePath());
     if (!out.open(QIODevice::WriteOnly)) return;
+    out.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     out.write(QJsonDocument(QJsonObject{{"version", 1}, {"recent", kept}}).toJson(QJsonDocument::Indented));
     out.commit();
 }

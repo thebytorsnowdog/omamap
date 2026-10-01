@@ -13,7 +13,15 @@ export QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 QTWEBENGINE_CHROMIUM_
 # Throwaway browser profile, recent list and settings.
 export XDG_DATA_HOME=$(mktemp -d) XDG_CACHE_HOME=$(mktemp -d) XDG_STATE_HOME=$(mktemp -d) XDG_CONFIG_HOME=$(mktemp -d)
 export OMAMAP_INSTANCE=smoke-$$   # never talk to the user's running OmaMap
-trap 'rm -rf "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"' EXIT
+# A private runtime directory too: the single-instance socket lives there.
+export XDG_RUNTIME_DIR=$(mktemp -d)
+chmod 700 "$XDG_RUNTIME_DIR"
+# Nothing here may reach the desktop: links the app hands out are only logged.
+fakebin=$(mktemp -d)
+printf '#!/bin/sh\necho "$*" >> "%s/opened"\n' "$fakebin" > "$fakebin/xdg-open"
+chmod +x "$fakebin/xdg-open"
+export PATH=$fakebin:$PATH BROWSER=true
+trap 'rm -rf "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$fakebin"' EXIT
 fail=0
 
 out=$(OMAMAP_SELFTEST=1 timeout 60 "$bin" --new-window $fix/park.geojson $fix/walk.gpx $fix/stations.csv \
@@ -88,4 +96,81 @@ if [[ $out == *'"mode":"light"'* && $out == *'rgb(250, 250, 250)'* && $out == *'
 else
   echo "✖ switching the Omarchy theme recolours the open window: $out"; fail=1
 fi
+# ---------------------------------------------------------------- security
+
+# Another local user can create sockets in /tmp. The old /tmp/omamap-$USER
+# socket let them receive every path this user opened with `omamap FILE`.
+squat=/tmp/omamap-${USER:-user}-$OMAMAP_INSTANCE
+received=$(mktemp)
+python3 -c '
+import socket, sys, os
+s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); s.settimeout(20)
+try:
+    c, _ = s.accept(); data = c.recv(65536); open(sys.argv[2], "wb").write(data)
+except socket.timeout: pass
+os.unlink(sys.argv[1])' "$squat" "$received" &
+squatter=$!
+sleep 1
+out=$(OMAMAP_SELFTEST=1 timeout 60 "$bin" $fix/cafes.geojson 2>/dev/null | tail -1 || true)
+kill $squatter 2>/dev/null || true; wait $squatter 2>/dev/null || true
+rm -f "$squat"
+if [[ ! -s $received && $out == *'cafes:2'* ]]; then
+  echo "✔ a socket squatted in /tmp never receives opened paths"
+else
+  echo "✖ a socket squatted in /tmp never receives opened paths: squatter got '$(cat "$received")', app: $out"; fail=1
+fi
+rm -f "$received"
+
+# File names may contain newlines; forwarding must not split them into two paths.
+odd=$(mktemp -d)
+cp $fix/cafes.geojson "$odd/odd"$'\n'"name.geojson"
+log=$(mktemp)
+OMAMAP_SELFTEST=1 OMAMAP_SELFTEST_DELAY=8000 timeout 60 "$bin" $fix/park.geojson > "$log" 2>/dev/null &
+first=$!
+sleep 3
+sock=$(ls "$XDG_RUNTIME_DIR"/omamap-*.sock 2>/dev/null | head -1 || true)
+timeout 10 "$bin" "$odd/odd"$'\n'"name.geojson" 2>/dev/null || true
+wait $first || true
+out=$(tail -1 "$log"); rm -rf "$log" "$odd"
+if [[ -n $sock && $out == *'park:1'* && $out == *'odd\nname:2'* ]]; then
+  echo "✔ the instance socket is in the runtime directory and forwards odd file names intact"
+else
+  echo "✖ the instance socket is in the runtime directory and forwards odd file names intact: socket '$sock', $out"; fail=1
+fi
+
+recent=$XDG_STATE_HOME/omamap/recent.json
+if [[ $(stat -c %a "$recent" 2>/dev/null) == 600 && $(stat -c %a "$(dirname "$recent")" 2>/dev/null) == 700 ]]; then
+  echo "✔ the recent-files list is private to the user"
+else
+  echo "✖ the recent-files list is private to the user: $(stat -c '%a %n' "$recent" "$(dirname "$recent")")"; fail=1
+fi
+
+# Page-level checks: headers, tokens, permissions, windows and navigation.
+probe='(async function () {
+  const r = [];
+  const to = (p) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error("timeout")), 1500))]);
+  const step = async (name, fn) => { try { r.push(name + "=" + await to(fn())); } catch (e) { r.push(name + "!" + e.name); } };
+  await step("csp", () => fetch("index.html").then((x) => /frame-ancestors .none./.test(x.headers.get("content-security-policy")) && x.headers.get("x-content-type-options")));
+  await step("guess", () => fetch("omamap://app/file/1/park.geojson").then((x) => x.status));
+  await step("clipboard", () => navigator.clipboard.readText());
+  await step("geo", () => new Promise((ok) => navigator.geolocation.getCurrentPosition(() => ok("granted"), (e) => ok("code" + e.code))));
+  await step("notify", () => Notification.requestPermission());
+  await step("popup", async () => window.open("https://example.com/popup") === null);
+  const click = (href) => { const a = document.createElement("a"); a.href = href; document.body.appendChild(a); a.click(); a.remove(); };
+  click("file:///etc/passwd"); click("steam://run/1"); click("omamap://app/vendor/leaflet.js"); click("https://example.com/link");
+  setTimeout(() => toast("probe " + r.join(" "), "", "err"), 1500);
+})();'
+log=$(mktemp)
+out=$(OMAMAP_DEBUG=1 QT_FORCE_STDERR_LOGGING=1 OMAMAP_SELFTEST=1 OMAMAP_SELFTEST_DELAY=12000 \
+  OMAMAP_SELFTEST_JS="$probe" timeout 60 "$bin" --new-window $fix/park.geojson 2>"$log" | tail -1)
+token_url=$(grep -o 'omamap://app/file/[0-9a-zA-Z]*/park.geojson' "$log" | head -1 || true)
+external=$(grep -o '\[open-external\] .*' "$log" | tr '\n' ' ' || true)
+want='csp=nosniff guess=404 clipboard!NotAllowedError geo=code1 notify=denied popup=true'
+if [[ $out == *"probe $want"* && $out == *'park:1'* && $token_url =~ /file/[0-9a-f]{32}/ && $external == '[open-external] https://example.com/link ' ]]; then
+  echo "✔ the host locks down headers, file tokens, permissions, windows and navigation"
+else
+  echo "✖ the host locks down headers, file tokens, permissions, windows and navigation:"
+  echo "    page: $out"; echo "    file url: $token_url"; echo "    opened externally: $external"; fail=1
+fi
+rm -f "$log"
 exit $fail

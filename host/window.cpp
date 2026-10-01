@@ -18,30 +18,58 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMessageBox>
 #include <QWebEngineDownloadRequest>
+#include <QWebEngineFileSystemAccessRequest>
+#include <QWebEngineFullScreenRequest>
 #include <QWebEngineNewWindowRequest>
+#include <QWebEnginePermission>
+#include <QWebEngineRegisterProtocolHandlerRequest>
 #include <QWebEngineProfile>
 #include <QWebEngineSettings>
 
+// Only plain web pages are handed to the browser: no other scheme (file:,
+// custom handlers, the app's own omamap:) and no embedded credentials.
 static bool isWebLink(const QUrl &url)
 {
-    return url.scheme() == QLatin1String("https") || url.scheme() == QLatin1String("http");
+    return url.isValid() && (url.scheme() == QLatin1String("https") || url.scheme() == QLatin1String("http"))
+        && !url.host().isEmpty() && url.userInfo().isEmpty();
+}
+
+static void openExternally(const QUrl &url)
+{
+    if (qEnvironmentVariableIsSet("OMAMAP_DEBUG")) qWarning().noquote() << "[open-external]" << url.toString();
+    QDesktopServices::openUrl(url);
 }
 
 Page::Page(QWebEngineProfile *profile, QObject *parent)
     : QWebEnginePage(profile, parent)
 {
-    // target=_blank links (attribute values, attribution) go to the default browser.
+    // target=_blank links the user clicks (attribute values) go to the default
+    // browser. Script-opened windows are refused (JavascriptCanOpenWindows is off).
     connect(this, &QWebEnginePage::newWindowRequested, this, [](QWebEngineNewWindowRequest &request) {
-        if (isWebLink(request.requestedUrl())) QDesktopServices::openUrl(request.requestedUrl());
+        if (request.isUserInitiated() && isWebLink(request.requestedUrl())) openExternally(request.requestedUrl());
     });
+    // The app needs no device, location, notification, clipboard-read or
+    // similar permission: refuse every request, and never remember one.
+    connect(this, &QWebEnginePage::permissionRequested, this, [](QWebEnginePermission permission) {
+        if (qEnvironmentVariableIsSet("OMAMAP_DEBUG")) qWarning() << "[permission denied]" << permission.permissionType();
+        permission.deny();
+    });
+    connect(this, &QWebEnginePage::fileSystemAccessRequested, this, [](QWebEngineFileSystemAccessRequest request) { request.reject(); });
+    connect(this, &QWebEnginePage::registerProtocolHandlerRequested, this, [](QWebEngineRegisterProtocolHandlerRequest request) { request.reject(); });
+    connect(this, &QWebEnginePage::fullScreenRequested, this, [](QWebEngineFullScreenRequest request) { request.reject(); });
 }
 
 bool Page::acceptNavigationRequest(const QUrl &url, NavigationType type, bool isMainFrame)
 {
-    if (url.scheme() == QLatin1String(SchemeHandler::Scheme)) return true;
-    if (isMainFrame && type == NavigationTypeLinkClicked && isWebLink(url)) QDesktopServices::openUrl(url);
-    // Anything else (a file dropped outside the drop handler, stray links) stays out.
+    // The window only ever shows the app itself.
+    if (isMainFrame && url.scheme() == QLatin1String(SchemeHandler::Scheme) && url.host() == QLatin1String(SchemeHandler::Host)
+        && (url.path() == QLatin1String("/index.html") || url.path() == QLatin1String("/")))
+        return true;
+    if (isMainFrame && type == NavigationTypeLinkClicked && isWebLink(url)) openExternally(url);
+    // Anything else (a file dropped outside the drop handler, stray links,
+    // frames) stays out.
     return false;
 }
 
@@ -67,13 +95,29 @@ Window::Window(QWebEngineProfile *profile, SchemeHandler *scheme, ThemeWatcher *
 {
     auto *page = new Page(profile, this);
     page->setBackgroundColor(QColor(theme->background()));   // no white flash on open
+    // Lock the engine down to what the app uses. Defaults that matter are set
+    // explicitly so a Qt default change cannot loosen them.
     auto *s = page->settings();
-    s->setAttribute(QWebEngineSettings::JavascriptCanAccessClipboard, true);
+    s->setAttribute(QWebEngineSettings::JavascriptCanAccessClipboard, true);   // Copy attributes (write)
     s->setAttribute(QWebEngineSettings::JavascriptCanPaste, false);
+    s->setAttribute(QWebEngineSettings::JavascriptCanOpenWindows, false);
     s->setAttribute(QWebEngineSettings::LocalContentCanAccessRemoteUrls, false);
+    s->setAttribute(QWebEngineSettings::LocalContentCanAccessFileUrls, false);
+    s->setAttribute(QWebEngineSettings::AllowRunningInsecureContent, false);
+    s->setAttribute(QWebEngineSettings::AllowGeolocationOnInsecureOrigins, false);
+    s->setAttribute(QWebEngineSettings::AllowWindowActivationFromJavaScript, false);
+    s->setAttribute(QWebEngineSettings::HyperlinkAuditingEnabled, false);
+    s->setAttribute(QWebEngineSettings::DnsPrefetchEnabled, false);
+    s->setAttribute(QWebEngineSettings::NavigateOnDropEnabled, false);
+    s->setAttribute(QWebEngineSettings::ScreenCaptureEnabled, false);
+    s->setAttribute(QWebEngineSettings::FullScreenSupportEnabled, false);
+    s->setAttribute(QWebEngineSettings::WebRTCPublicInterfacesOnly, true);
     s->setAttribute(QWebEngineSettings::PluginsEnabled, false);
     s->setAttribute(QWebEngineSettings::PdfViewerEnabled, false);
+    s->setAttribute(QWebEngineSettings::ErrorPageEnabled, false);
     s->setAttribute(QWebEngineSettings::FocusOnNavigationEnabled, true);
+    // Links to unknown schemes (steam:, mailto:, custom handlers) never reach the desktop.
+    s->setUnknownUrlSchemePolicy(QWebEngineSettings::DisallowUnknownUrlSchemes);
     setPage(page);
     setContextMenuPolicy(Qt::NoContextMenu);
     setWindowTitle(QStringLiteral("OmaMap"));
@@ -133,7 +177,8 @@ void Window::saveDownload(QWebEngineDownloadRequest *download)
 {
     if (qEnvironmentVariableIsSet("OMAMAP_DEBUG"))
         qWarning().noquote() << "[download]" << download->url().toString() << "page match" << (download->page() == page()) << download->suggestedFileName();
-    if (download->page() != page() || download->url().scheme() != QLatin1String("blob")) {
+    if (download->page() != page() || download->isSavePageDownload() || download->url().scheme() != QLatin1String("blob")
+        || !download->url().path().startsWith(QStringLiteral("omamap://app/"))) {
         download->cancel();
         return;
     }
@@ -143,12 +188,23 @@ void Window::saveDownload(QWebEngineDownloadRequest *download)
     if (dir.isEmpty() || !QFileInfo(dir).isDir()) dir = QDir::homePath();
 
     QString target = qEnvironmentVariable("OMAMAP_SAVE_PATH");   // tests: no dialog
-    if (target.isEmpty()) {
+    const bool dialog = target.isEmpty();
+    if (dialog) {
         target = QFileDialog::getSaveFileName(this, QStringLiteral("Save OmaMap profile"),
             QDir(dir).filePath(download->suggestedFileName()), QStringLiteral("OmaMap profile (*.omamap)"));
     }
     if (target.isEmpty()) { download->cancel(); return; }
-    if (!target.endsWith(QLatin1String(".omamap"), Qt::CaseInsensitive)) target += QLatin1String(".omamap");
+    if (!target.endsWith(QLatin1String(".omamap"), Qt::CaseInsensitive)) {
+        target += QLatin1String(".omamap");
+        // The dialog confirmed replacing the name as typed, not this one.
+        if (dialog && QFileInfo::exists(target)
+            && QMessageBox::question(this, QStringLiteral("Replace profile?"),
+                   QStringLiteral("%1 already exists. Replace it?").arg(QFileInfo(target).fileName()),
+                   QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
+            download->cancel();
+            return;
+        }
+    }
     const QFileInfo info(target);
     settings.setValue(QStringLiteral("profiles/lastDir"), info.absolutePath());
     // The dialog has already confirmed replacing an existing file.
