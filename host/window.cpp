@@ -160,6 +160,7 @@ Window::Window(QWebEngineProfile *profile, SchemeHandler *scheme, ThemeWatcher *
         }
         m_ready = false;
         m_recovered = true;
+        m_scheme->revokeAll();   // URLs handed to the dead page must not outlive it
         QTimer::singleShot(500, this, [this] { load(QUrl(QStringLiteral("%1://%2/index.html").arg(SchemeHandler::Scheme, SchemeHandler::Host))); });
     });
     connect(theme, &ThemeWatcher::changed, this, [this, page] {
