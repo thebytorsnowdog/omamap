@@ -301,10 +301,43 @@ function selectBox(options, value, onChange) {
   return s;
 }
 
-let restyleFrame = 0;
+/* Restyles requested while a slider or colour picker is dragged. A restyle
+   of a large path dataset is followed by a full canvas redraw of similar
+   cost, so applying one per input event kept the window busy and the slider
+   lagging behind the pointer. Requests are coalesced, and after each restyle
+   the main thread is left free for at least as long as that restyle and its
+   redraw took, so input and the slider itself keep painting. The latest
+   value is always applied. */
+const Restyle = { pending: new Set(), frame: 0, timer: 0, freeUntil: 0, waiters: [] };
+
 function scheduleRestyle(ds) {
-  cancelAnimationFrame(restyleFrame);
-  restyleFrame = requestAnimationFrame(function () { applyDatasetStyle(ds); highlightSelection(); renderLegend(); refreshSwatches(); });
+  Restyle.pending.add(ds);
+  if (Restyle.frame || Restyle.timer) return;
+  const wait = Restyle.freeUntil - performance.now();
+  const go = function () { Restyle.timer = 0; Restyle.frame = requestAnimationFrame(runRestyles); };
+  if (wait > 1) Restyle.timer = setTimeout(go, wait); else go();
+}
+
+function runRestyles() {
+  Restyle.frame = 0;
+  const started = performance.now();
+  const list = Array.from(Restyle.pending);
+  Restyle.pending.clear();
+  list.forEach(function (ds) { if (STATE.datasets.indexOf(ds) >= 0) applyDatasetStyle(ds); });
+  highlightSelection(); renderLegend(); refreshSwatches();
+  // Measure through the next frame, which includes the canvas redraw.
+  requestAnimationFrame(function () {
+    const now = performance.now();
+    Restyle.freeUntil = now + Math.min(400, now - started);
+    if (Restyle.pending.size) scheduleRestyle(Restyle.pending.values().next().value);
+    else if (!Restyle.timer && !Restyle.frame) Restyle.waiters.splice(0).forEach(function (resolve) { resolve(); });
+  });
+}
+
+// Resolves once every requested restyle has been applied and painted.
+function restyleIdle() {
+  if (!Restyle.pending.size && !Restyle.frame && !Restyle.timer) return Promise.resolve();
+  return new Promise(function (resolve) { Restyle.waiters.push(resolve); });
 }
 
 function renderStyleEditor(ds) {

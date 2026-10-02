@@ -1,7 +1,7 @@
 "use strict";
 /* Interaction benchmark on large synthetic data, measured inside the page.
    Reports wall time per operation and the longest main-thread freeze.
-   Usage: node tests/bench.cjs  (BENCH_POINTS / BENCH_POLYGONS to resize) */
+   Usage: node tests/bench.cjs  (BENCH_POINTS / BENCH_POLYGONS / BENCH_WIDE_COLS / BENCH_KML to resize) */
 const http = require("node:http"), fs = require("node:fs"), path = require("node:path");
 const { chromium } = require("playwright-core");
 const CORE = path.join(__dirname, "..", "core");
@@ -22,7 +22,7 @@ const N_POINTS = Number(process.env.BENCH_POINTS || 100000), N_POLYS = Number(pr
   await page.goto("http://127.0.0.1:" + server.address().port + "/index.html");
   await page.waitForFunction(() => window.OmaMap);
 
-  const results = await page.evaluate(async ([nPoints, nPolys]) => {
+  const results = await page.evaluate(async ([nPoints, nPolys, BENCH_WIDE_COLS, BENCH_KML]) => {
     const out = [];
     let longest = 0;
     new PerformanceObserver((list) => list.getEntries().forEach((e) => { longest = Math.max(longest, e.duration); })).observe({ type: "longtask", buffered: false });
@@ -62,8 +62,50 @@ const N_POINTS = Number(process.env.BENCH_POINTS || 100000), N_POLYS = Number(pr
     await measure("table polygons", async () => { Table.open(Q); });
     await measure("hide + show polygons", async () => { toggleVisible(Q.id); toggleVisible(Q.id); });
     await measure("save profile (bounded export)", async () => { await OmaParse.profileBlob(buildProfile()); });
+
+    // Style slider drag: 20 input events on the polygon outline width, one per frame.
+    STATE.styleOpenId = Q.id; renderLayerList();
+    const slider = Array.from(document.querySelectorAll(".style-editor input[type=range]")).find((r) => r.max === "8");
+    await measure("slider drag x30 (polygons)", async () => {
+      const lat = [];
+      for (let i = 0; i < 30; i++) {
+        slider.value = String(1 + (i % 10) * 0.5); slider.dispatchEvent(new Event("input"));
+        const t = performance.now(); await frame(); lat.push(performance.now() - t);
+      }
+      if (window.restyleIdle) await restyleIdle();
+      lat.sort((a, b) => a - b);
+      out.push({ name: "  slider input->paint ms (median|worst)", ms: Math.round(lat[15]), freeze: Math.round(lat[29]) });
+    });
+    STATE.styleOpenId = null; renderLayerList();
+
+    // Wide attribute table: draw + layout cost per scroll step.
+    const wideCols = Number(BENCH_WIDE_COLS), wide = [];
+    for (let i = 0; i < 20000; i++) { const p = {}; for (let c = 0; c < wideCols; c++) p["field_" + c] = "v" + ((i * 7 + c) % 97); wide.push({ type: "Feature", geometry: { type: "Point", coordinates: [-4 + rnd(), 55.5 + rnd()] }, properties: p }); }
+    const W = addDataset({ name: "wide", geojson: { type: "FeatureCollection", features: wide } });
+    await measure("open table (20k x " + wideCols + " cols)", async () => { Table.open(W); });
+    const scrollSteps = async (dx, dy) => {
+      const scroll = document.getElementById("tp-scroll"); let total = 0, worst = 0;
+      for (let i = 0; i < 60; i++) {
+        scroll.scrollTop += dy; scroll.scrollLeft += dx;
+        const t = performance.now(); Table.draw(); void document.getElementById("tp-body").offsetHeight; const ms = performance.now() - t;
+        total += ms; worst = Math.max(worst, ms); await frame();
+      }
+      return { avg: total / 60, worst: worst };
+    };
+    const v = await scrollSteps(0, 130);
+    out.push({ name: "table scroll v (ms/step avg|worst)", ms: Math.round(v.avg * 10) / 10, freeze: Math.round(v.worst * 10) / 10 });
+    const h = await scrollSteps(150, 0);
+    out.push({ name: "table scroll h (ms/step avg|worst)", ms: Math.round(h.avg * 10) / 10, freeze: Math.round(h.worst * 10) / 10 });
+    out.push({ name: "table DOM nodes after scroll", ms: document.getElementById("tp-body").getElementsByTagName("*").length, freeze: 0 });
+    Table.close();
+
+    // KML read on the main thread.
+    let kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>';
+    for (let i = 0; i < Number(BENCH_KML); i++) kml += "<Placemark><name>P" + i + "</name><ExtendedData><Data name=\"k\"><value>" + i + "</value></Data></ExtendedData><Point><coordinates>" + (-4 + rnd()) + "," + (55.5 + rnd()) + "</coordinates></Point></Placemark>";
+    kml += "</Document></kml>";
+    await measure("load " + BENCH_KML + "-placemark KML", () => handleFiles([new File([kml], "big.kml")]));
     return out;
-  }, [N_POINTS, N_POLYS]);
+  }, [N_POINTS, N_POLYS, process.env.BENCH_WIDE_COLS || 120, process.env.BENCH_KML || 50000]);
   console.log("operation".padEnd(34) + "wall ms   longest freeze ms");
   for (const r of results) console.log(r.name.padEnd(34) + String(r.ms).padStart(7) + String(r.freeze).padStart(12));
   await browser.close(); server.close();
