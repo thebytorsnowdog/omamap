@@ -228,6 +228,8 @@ function styleFeatureLayer(layer, ds, selected, cache) {
       st = leafStyle(leaf, colour, ds.style, selected);
       if (cache) cache.set(key, st);
     }
+    // The selection is always drawn in full (batchcanvas.js).
+    if (leaf._omaBatch && leaf._omaHighlight !== !!selected) leaf._omaHighlight = !!selected;
     leaf.setStyle(st);
   });
 }
@@ -309,6 +311,17 @@ function* prepareDataset(parsed, base) {
     else { featureIndex = i; paths.addData(f); }
     if (i % 512 === 0) yield;
   }
+  // Large vector datasets draw their tiny shapes as rectangles (batchcanvas.js).
+  if (geojson.features.length - points.length >= OmaBatch.MIN_FEATURES) {
+    const mark = function (leaf) {
+      if (!(leaf instanceof L.Polyline)) return;
+      leaf._omaBatch = true; leaf._omaHighlight = false;
+    };
+    for (let i = 0; i < layers.length; i++) {
+      if (layers[i]) eachLeaf(layers[i], mark);
+      if (i % 2048 === 0) yield;
+    }
+  }
   let layer = paths;
   if (points.length) {
     const fast = new FastPoints(points, {deferred:true});
@@ -375,8 +388,25 @@ function toggleVisible(id) {
   setStatus((ds.visible ? "Showing " : "Hid ") + ds.name + ".");
 }
 
+// Width of the map hidden behind the floating inspector, in pixels. Zero when
+// it is closed, or when the map is so narrow the panel covers most of it
+// (there is no useful uncovered area to fit into then).
+function panelInset() {
+  const insp = el("inspector");
+  if (!insp || insp.hidden) return 0;
+  const map = STATE.map.getContainer().getBoundingClientRect(), r = insp.getBoundingClientRect();
+  if (r.left - map.left < 200) return 0;
+  return Math.max(0, Math.round(map.right - r.left));
+}
+
+// The part of the map the user can actually see.
+function visibleBounds() {
+  const size = STATE.map.getSize(), inset = panelInset();
+  return L.latLngBounds(STATE.map.containerPointToLatLng([0, size.y]), STATE.map.containerPointToLatLng([size.x - inset, 0]));
+}
+
 function fitBounds(bounds, maxZoom) {
-  if (bounds && bounds.isValid()) STATE.map.fitBounds(bounds, { padding: [40, 40], maxZoom: maxZoom || 16 });
+  if (bounds && bounds.isValid()) STATE.map.fitBounds(bounds, { paddingTopLeft: [40, 40], paddingBottomRight: [40 + panelInset(), 40], maxZoom: maxZoom || 16 });
 }
 
 function zoomToDataset(id) {
@@ -596,7 +626,11 @@ function clearSelection() {
   clearHighlight();
   STATE.hits = [];
   STATE.hitIndex = 0;
-  el("inspector").hidden = true;
+  const insp = el("inspector");
+  // Closing the panel must not strand keyboard focus on a hidden button.
+  const hadFocus = insp.contains(document.activeElement);
+  insp.hidden = true;
+  if (hadFocus) STATE.map.getContainer().focus({ preventScroll: true });
   renderLayerList();
   Table.onSelection();
   setStatus("Selection cleared.");
@@ -619,11 +653,17 @@ function panToSelection() {
   const hit = currentHit();
   if (!hit) return;
   const layer = hit.layer;
-  const view = STATE.map.getBounds();
+  const view = visibleBounds(), inset = panelInset();
   if (layer.getLatLng) {
     const ll = layer.getLatLng();
-    if (STATE.map.getZoom() < 13) STATE.map.setView(ll, 15);
-    else if (!view.pad(-0.1).contains(ll)) STATE.map.panTo(ll);
+    if (STATE.map.getZoom() < 13) {
+      // Centre it in the uncovered part of the map.
+      const at = STATE.map.project(ll, 15).add([inset / 2, 0]);
+      STATE.map.setView(STATE.map.unproject(at, 15), 15);
+    } else if (!view.pad(-0.1).contains(ll)) {
+      const s = STATE.map.getSize();
+      STATE.map.panInside(ll, { paddingTopLeft: [s.x * 0.1, s.y * 0.1], paddingBottomRight: [inset + s.x * 0.1, s.y * 0.1] });
+    }
     return;
   }
   const b = layer.getBounds();
@@ -1171,7 +1211,7 @@ function wireKeys() {
 }
 
 function initMap() {
-  STATE.renderer = L.canvas({ padding: 0.5, tolerance: 4 });
+  STATE.renderer = OmaBatch.canvas({ padding: 0.5, tolerance: 4 });
   STATE.map = L.map("map", {
     preferCanvas: true, renderer: STATE.renderer, zoomControl: true, attributionControl: true,
     worldCopyJump: true, minZoom: 2, maxZoom: 22, zoomSnap: 0.5, boxZoom: true

@@ -48,6 +48,26 @@
         <div class="legend" id="legend" aria-label="Legend" hidden></div>
         <div class="drop-veil" id="drop-veil" aria-hidden="true"><div>Drop to add datasets</div></div>
         <div class="loading" id="loading" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span><span id="loading-msg">Reading…</span><button type="button" class="btn subtle" id="loading-cancel">Cancel</button></div>
+        <aside class="inspector" id="inspector" aria-label="Feature attributes" hidden>
+          <div class="insp-head">
+            <span class="swatch" id="insp-swatch" aria-hidden="true"></span>
+            <div class="insp-title">
+              <div class="insp-ds" id="insp-ds"></div>
+              <div class="insp-sub" id="insp-sub"></div>
+            </div>
+            <button type="button" class="icon-btn" id="insp-close" aria-label="Close (Esc)" title="Close (Esc)">×</button>
+          </div>
+          <div class="insp-hits" id="insp-hits" hidden></div>
+          <div class="insp-actions">
+            <input type="search" id="attr-filter" placeholder="Filter attributes" autocomplete="off" spellcheck="false" aria-label="Filter attributes">
+            <button type="button" class="btn" id="insp-zoom" title="Zoom to feature (Z)">Zoom</button>
+            <button type="button" class="btn" id="insp-table" title="Show in attribute table (T)">Table</button>
+            <button type="button" class="btn" id="insp-copy" title="Copy attributes as tab-separated text">Copy</button>
+          </div>
+          <div class="insp-body">
+            <table class="attrs"><tbody id="insp-attrs"></tbody></table>
+          </div>
+        </aside>
       </div>
       <section class="table-panel" id="table-panel" aria-label="Attribute table" hidden>
         <div class="tp-resize" id="tp-resize" title="Drag to resize"></div>
@@ -67,26 +87,6 @@
       </section>
     </div>
 
-    <aside class="inspector" id="inspector" aria-label="Feature attributes" hidden>
-      <div class="insp-head">
-        <span class="swatch" id="insp-swatch" aria-hidden="true"></span>
-        <div class="insp-title">
-          <div class="insp-ds" id="insp-ds"></div>
-          <div class="insp-sub" id="insp-sub"></div>
-        </div>
-        <button type="button" class="icon-btn" id="insp-close" aria-label="Close (Esc)" title="Close (Esc)">×</button>
-      </div>
-      <div class="insp-hits" id="insp-hits" hidden></div>
-      <div class="insp-actions">
-        <input type="search" id="attr-filter" placeholder="Filter attributes" autocomplete="off" spellcheck="false" aria-label="Filter attributes">
-        <button type="button" class="btn" id="insp-zoom" title="Zoom to feature (Z)">Zoom</button>
-        <button type="button" class="btn" id="insp-table" title="Show in attribute table (T)">Table</button>
-        <button type="button" class="btn" id="insp-copy" title="Copy attributes as tab-separated text">Copy</button>
-      </div>
-      <div class="insp-body">
-        <table class="attrs"><tbody id="insp-attrs"></tbody></table>
-      </div>
-    </aside>
   </main>
 
   <footer class="status">
@@ -101,6 +101,7 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/togeojson.umd.js"></script>
 <script src="fastpoints.js"></script>
+<script src="batchcanvas.js"></script>
 <script src="spatial.js"></script>
 <script src="parse.js"></script>
 <script src="basemaps.js"></script>
