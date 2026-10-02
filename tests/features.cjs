@@ -94,6 +94,23 @@ function fixtures(dir) {
     assert.equal(s.weight, 4);
   });
 
+  await check("a fast slider drag coalesces restyles and ends on the last value", async () => {
+    const r = await page.evaluate(async () => {
+      const ds = STATE.datasets.find((d) => d.name === "sites");
+      const real = window.applyDatasetStyle;
+      let calls = 0;
+      window.applyDatasetStyle = function (d) { calls++; return real(d); };
+      try {
+        const slider = Array.from(document.querySelectorAll(".style-editor input[type=range]")).find((x) => x.max === "8");
+        for (let i = 0; i < 12; i++) { slider.value = String(1 + i * 0.5); slider.dispatchEvent(new Event("input")); }
+        await restyleIdle();
+      } finally { window.applyDatasetStyle = real; }
+      return { calls, weight: ds.layers[0].options.weight };
+    });
+    assert.ok(r.calls >= 1 && r.calls <= 2, "restyles: " + r.calls);
+    assert.equal(r.weight, 6.5);
+  });
+
   await check("outline option uses the theme's text colour", async () => {
     await page.locator(".style-editor .st-row", { hasText: "Outline" }).locator("select").selectOption("fg");
     await settle();
