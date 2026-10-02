@@ -10,4 +10,4 @@ Terminal=false
 StartupWMClass=omamap
 Categories=Science;Geography;
 Keywords=map;gis;geojson;kml;gpx;shapefile;spatial;satellite;
-MimeType=application/x-omamap-profile;application/geo+json;application/vnd.google-earth.kml+xml;application/gpx+xml;application/x-shapefile;
+MimeType=application/x-omamap-profile;application/geo+json;application/vnd.google-earth.kml+xml;application/vnd.google-earth.kmz;application/gpx+xml;application/x-shapefile;

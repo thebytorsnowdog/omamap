@@ -81,7 +81,7 @@ bool Page::acceptNavigationRequest(const QUrl &url, NavigationType type, bool is
 QStringList Page::chooseFiles(FileSelectionMode mode, const QStringList &oldFiles, const QStringList &acceptedMimeTypes)
 {
     const QStringList chosen = QWebEnginePage::chooseFiles(mode, oldFiles, acceptedMimeTypes);
-    for (const QString &path : chosen) Recent::add(path);
+    Recent::addMany(chosen);
     return chosen;
 }
 
@@ -160,6 +160,7 @@ Window::Window(QWebEngineProfile *profile, SchemeHandler *scheme, ThemeWatcher *
         }
         m_ready = false;
         m_recovered = true;
+        m_scheme->revokeAll();   // URLs handed to the dead page must not outlive it
         QTimer::singleShot(500, this, [this] { load(QUrl(QStringLiteral("%1://%2/index.html").arg(SchemeHandler::Scheme, SchemeHandler::Host))); });
     });
     connect(theme, &ThemeWatcher::changed, this, [this, page] {
@@ -248,10 +249,11 @@ void Window::flush()
 {
     if (!m_ready || m_pending.isEmpty()) return;
     QJsonArray list;
+    QStringList opened;
     for (const QString &path : std::as_const(m_pending)) {
         const QFileInfo info(path);
         if (!info.isFile() || !info.isReadable()) continue;
-        Recent::add(info.absoluteFilePath());
+        opened << info.absoluteFilePath();
         list.append(QJsonObject{
             {"url", m_scheme->shareFile(info.absoluteFilePath())},
             {"name", info.fileName()},
@@ -260,6 +262,7 @@ void Window::flush()
     }
     m_pending.clear();
     if (list.isEmpty()) return;
+    Recent::addMany(opened);   // one rewrite of the list per batch, not per file
     const QString json = QString::fromUtf8(QJsonDocument(list).toJson(QJsonDocument::Compact));
     page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.openUrls(%1);").arg(json));
 }

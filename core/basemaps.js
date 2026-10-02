@@ -1,7 +1,8 @@
 "use strict";
 /* Background maps. Selecting one sends tile requests for the visible area to
    that provider. All of these work without an API key. Every origin here must
-   also appear in index.html's CSP img-src and host/scheme.cpp's RequestFilter.
+   also appear in index.html's CSP img-src and host/scheme.cpp's CSP and
+   RequestFilter; tests/hosts.test.cjs checks they match.
    `labels` is an optional transparent overlay drawn above the data. */
 const OMAMAP_BASEMAPS = [
   {

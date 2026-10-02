@@ -22,31 +22,44 @@ QString filePath()
 
 void add(const QString &path)
 {
-    const QFileInfo info(path);
-    if (!info.isFile()) return;
-    // Loose shapefile parts are opened together; remember only the .shp.
-    const QString ext = info.suffix().toLower();
-    if (ext == QLatin1String("dbf") || ext == QLatin1String("prj") || ext == QLatin1String("cpg") || ext == QLatin1String("shx")) return;
+    addMany({path});
+}
+
+void addMany(const QStringList &paths)
+{
+    // Newest first: walk the batch backwards so its last file leads.
+    QJsonArray kept;
+    QStringList seen;
+    const QString now = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+    for (qsizetype i = paths.size() - 1; i >= 0 && kept.size() < MaxEntries; i--) {
+        const QFileInfo info(paths.at(i));
+        if (!info.isFile()) continue;
+        // Loose shapefile parts are opened together; remember only the .shp.
+        const QString ext = info.suffix().toLower();
+        if (ext == QLatin1String("dbf") || ext == QLatin1String("prj") || ext == QLatin1String("cpg") || ext == QLatin1String("shx")) continue;
+        const QString absolute = info.absoluteFilePath();
+        if (seen.contains(absolute)) continue;
+        seen << absolute;
+        kept.append(QJsonObject{
+            {"path", absolute},
+            {"name", info.fileName()},
+            {"kind", ext == QLatin1String("omamap") ? "profile" : "data"},
+            {"time", now},
+        });
+    }
+    if (kept.isEmpty()) return;
 
     QJsonArray entries;
     QFile in(filePath());
-    if (in.open(QIODevice::ReadOnly)) entries = QJsonDocument::fromJson(in.readAll()).object().value("recent").toArray();
-
-    const QString absolute = info.absoluteFilePath();
-    QJsonArray kept;
-    kept.append(QJsonObject{
-        {"path", absolute},
-        {"name", info.fileName()},
-        {"kind", ext == QLatin1String("omamap") ? "profile" : "data"},
-        {"time", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
-    });
+    if (in.open(QIODevice::ReadOnly)) entries = QJsonDocument::fromJson(in.read(1024 * 1024)).object().value("recent").toArray();
     for (const QJsonValue &v : std::as_const(entries)) {
+        if (kept.size() >= MaxEntries) break;
         // Carry earlier entries forward field by field, so whatever else the
         // file held is not repeated.
         const QJsonObject e = v.toObject();
         const QString p = e.value("path").toString();
-        if (p.isEmpty() || !QDir::isAbsolutePath(p) || p == absolute || !QFileInfo::exists(p)) continue;
-        if (kept.size() >= MaxEntries) break;
+        if (p.isEmpty() || !QDir::isAbsolutePath(p) || seen.contains(p) || !QFileInfo::exists(p)) continue;
+        seen << p;
         kept.append(QJsonObject{
             {"path", p},
             {"name", QFileInfo(p).fileName()},

@@ -250,6 +250,22 @@ test("profile style values are cleaned, and unsafe fields dropped", async () => 
   assert.equal(st.byField, null);
 });
 
+test("profile dataset warnings are kept, cleaned and capped", async () => {
+  const many = Array.from({ length: 30 }, (_, i) => "note " + i);
+  const p = await P.parseBytes("w.omamap", bytes(profileOf({ datasets: [
+    { name: "A", warnings: ["No .prj file: coordinates were assumed to be WGS84.", "bad\u0000\nline", 7, { html: "<b>" }, "", "x".repeat(1000)], geojson: JSON.parse(POINT_FC) },
+    { name: "B", warnings: many, geojson: JSON.parse(POINT_FC) },
+    { name: "C", warnings: "not a list", geojson: JSON.parse(POINT_FC) },
+    { name: "D", geojson: JSON.parse(POINT_FC) }] })));
+  const [a, b, c, d] = p.datasets;
+  assert.deepEqual(a.warnings.slice(0, 2), ["No .prj file: coordinates were assumed to be WGS84.", "bad  line"]);
+  assert.equal(a.warnings.length, 3);
+  assert.equal(a.warnings[2].length, 300);
+  assert.equal(b.warnings.length, 20);
+  assert.deepEqual(c.warnings, []);
+  assert.deepEqual(d.warnings, []);
+});
+
 test("profiles with bad data or from a newer version are rejected", async () => {
   await assert.rejects(P.parseBytes("x.omamap", bytes(profileOf({ version: 99 }))), /newer OmaMap/);
   await assert.rejects(P.parseBytes("x.omamap", bytes(profileOf({ datasets: [{ name: "Bad", geojson: { type: "Point", coordinates: [500, 500] } }] }))), /Bad.*WGS84/);
@@ -458,4 +474,43 @@ test("workspace limits count all datasets together", () => {
 test("CSV preflight accepts a UTF-8 BOM before quoted headers", () => {
   const fc = P.csvToGeoJSON('\ufeff"lat","lon","note"\n1,2,"a,b"');
   assert.equal(fc.features[0].properties.note,'a,b');
+});
+
+test("a 200k x 20 CSV inside the documented limits is accepted (names are charged once)", () => {
+  const rows = ["lat,lon," + Array.from({ length: 18 }, (_, i) => "field_" + i).join(",")];
+  for (let i = 0; i < 200000; i++) {
+    const r = [51 + (i % 1000) / 1000, -1 - (i % 997) / 1000];
+    for (let c = 2; c < 20; c++) r.push("v" + (i % 50));
+    rows.push(r.join(","));
+  }
+  const fc = P.csvToGeoJSON(rows.join("\n"));
+  assert.equal(fc.features.length, 200000);
+  assert.equal(fc.fields.length, 20);
+  assert.ok(fc.estimatedBytes < P.LIMITS.workspaceBytes);
+});
+
+test("attribute data beyond the budget is refused with a clear reason", () => {
+  const big = "x".repeat(90000);
+  const features = Array.from({ length: 1300 }, () => ({ type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: { a: big } }));
+  assert.throws(() => P.validateFeatureCollection({ type: "FeatureCollection", features }), /200 MiB attribute budget after [\d,]+ features\. Remove unused columns/);
+});
+
+test("KML and GPX inside a ZIP or KMZ come back for the page to convert", async () => {
+  const kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><Point><coordinates>-1,51</coordinates></Point></Placemark></kml>';
+  const gpx = '<?xml version="1.0"?><gpx version="1.1" creator="t"><wpt lat="51" lon="-1"/></gpx>';
+  const pt = JSON.stringify({ type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: {} });
+  const zip = fflate.zipSync({ "doc.kml": fflate.strToU8(kml), "walk.gpx": fflate.strToU8(gpx), "p.geojson": fflate.strToU8(pt) });
+  const layers = await P.parseBytes("mixed.zip", zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength));
+  assert.deepEqual(layers.map((l) => l.name).sort(), ["mixed / doc", "mixed / p", "mixed / walk"]);
+  const xml = layers.filter((l) => l.xml).map((l) => l.xml.ext).sort();
+  assert.deepEqual(xml, ["gpx", "kml"]);
+  const kmz = fflate.zipSync({ "doc.kml": fflate.strToU8(kml) });
+  const only = await P.parseBytes("trip.kmz", kmz.buffer.slice(kmz.byteOffset, kmz.byteOffset + kmz.byteLength));
+  assert.equal(only.length, 1); assert.equal(only[0].name, "trip"); assert.equal(only[0].xml.items, 1);
+  const bad = fflate.zipSync({ "doc.kml": fflate.strToU8('<!DOCTYPE x [<!ENTITY a "b">]>' + kml) });
+  await assert.rejects(P.parseBytes("bad.kmz", bad.buffer.slice(bad.byteOffset, bad.byteOffset + bad.byteLength)), /DOCTYPE/);
+  // Converted on the page; totals are re-checked with exact counts.
+  const two = [{ xml: { text: "", ext: "kml" } }, { xml: { text: "", ext: "kml" } }];
+  const run = () => ({ type: "FeatureCollection", features: new Array(600000).fill(0) });
+  await assert.rejects(P.resolveXmlLayers(two, run), /together exceed/);
 });
