@@ -1181,7 +1181,7 @@ function initMap() {
   STATE.map.getPane("labels").style.zIndex = 450;          // above overlays (400), below markers' tooltips
   STATE.map.getPane("labels").style.pointerEvents = "none";
   L.control.scale({ position: "bottomleft", maxWidth: 140 }).addTo(STATE.map);
-  let view = null;
+  let view;
   try { view = JSON.parse(storageGet(STORAGE_KEYS.view) || "null"); } catch (e) { view = null; }
   if (view && Number.isFinite(view.lat) && Number.isFinite(view.lng) && Number.isFinite(view.zoom)) STATE.map.setView([view.lat, view.lng], view.zoom);
   else STATE.map.setView([30, 0], 3);

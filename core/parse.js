@@ -433,7 +433,7 @@
     if ((parsed.data.length - 1) * fields.length > LIMITS.cells) throw new Error("CSV has more than " + LIMITS.cells.toLocaleString() + " cells (rows × columns).");
     const headerKeys = new Set();
     fields.forEach(function (field, index) {
-      const key = String(field).replace(/^﻿/, "").trim();
+      const key = String(field).replace(/^\uFEFF/, "").trim();
       if (!key || headerKeys.has(key)) throw new Error("CSV headers must be non-empty and unique.");
       if (FORBIDDEN_PROPERTY_NAMES.indexOf(key) !== -1) throw new Error("Rejected unsafe CSV header: " + key);
       fields[index] = key;

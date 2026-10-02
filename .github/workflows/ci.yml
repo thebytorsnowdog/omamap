@@ -30,6 +30,7 @@ jobs:
       - name: Trust the checked-out workspace in this disposable container
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - run: npm ci --ignore-scripts
+      - run: npm run lint
       - run: npm test
       - run: npm run test:browser
       - run: cmake -S host -B build -DCMAKE_BUILD_TYPE=Release
