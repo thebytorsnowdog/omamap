@@ -6,6 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 include(GNUInstallDirs)
 
+# A binary run from its own build directory loads this checkout's core, so
+# `cmake --build build && build/omamap` picks up edits without installing.
+# Packages turn this off: an installed binary then never reads web code from
+# the (possibly temporary, possibly shared) directory it was built in.
+option(OMAMAP_DEV_CORE "Let a binary in its build directory load the checkout's core" ON)
+
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network WebEngineCore WebEngineWidgets)
 
 add_executable(omamap
@@ -20,9 +26,12 @@ add_executable(omamap
 target_compile_definitions(omamap PRIVATE
   OMAMAP_VERSION="${PROJECT_VERSION}"
   OMAMAP_INSTALLED_CORE="${CMAKE_INSTALL_FULL_DATADIR}/omamap/core"
-  OMAMAP_SOURCE_CORE="${CMAKE_CURRENT_SOURCE_DIR}/../core"
-  OMAMAP_BUILD_DIR="${CMAKE_CURRENT_BINARY_DIR}"
 )
+if(OMAMAP_DEV_CORE)
+  target_compile_definitions(omamap PRIVATE
+    OMAMAP_SOURCE_CORE="${CMAKE_CURRENT_SOURCE_DIR}/../core"
+    OMAMAP_BUILD_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+endif()
 target_link_libraries(omamap PRIVATE
   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::WebEngineCore Qt6::WebEngineWidgets)
 

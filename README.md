@@ -161,12 +161,12 @@ cmake -S host -B build && cmake --build build
 npm install                 # playwright-core, for the browser tests
 npm test                    # parser, validation, bar widget and vendor-hash tests
 npm run test:browser        # drives core/ in Chromium, incl. hostile-input tests (CHROMIUM=/usr/bin/chromium)
-ctest --test-dir build --output-on-failure # native atomic profile replacement regressions
+ctest --test-dir build --output-on-failure # native profile-save and recent-list tests
 tests/host-smoke.sh         # headless checks of the native host and its hardening (run test:browser first)
 npm run serve               # core/ at http://127.0.0.1:8765 for quick UI work
 ```
 
-`OMAMAP_DEBUG=1` prints page console messages and app-scheme requests. Add `QT_FORCE_STDERR_LOGGING=1` when stderr isn't a terminal. `OMAMAP_CORE_DIR` and `OMAMAP_THEME_DIR` override where the web core and the Omarchy theme are read from. `OMAMAP_INSTANCE=name` uses a separate single-instance channel, so a test run never sends files to your open window.
+`OMAMAP_DEBUG=1` prints page console messages and app-scheme requests. Add `QT_FORCE_STDERR_LOGGING=1` when stderr isn't a terminal. `OMAMAP_CORE_DIR` and `OMAMAP_THEME_DIR` override where the web core and the Omarchy theme are read from. `OMAMAP_INSTANCE=name` uses a separate single-instance channel, so a test run never sends files to your open window. Packages should configure with `-DOMAMAP_DEV_CORE=OFF` so the installed binary never reads `core/` from the build tree.
 
 ### Origins
 

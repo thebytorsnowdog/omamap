@@ -25,20 +25,47 @@
 #include <unistd.h>
 #endif
 
+// The core is code the app runs, so it must not be a folder another local
+// user can change: refuse one that is writable by group or others, or owned
+// by someone other than this user or root.
+static bool trustedCore(const QString &dir)
+{
+    const QFileInfo info(dir);
+    if (!info.isDir() || !QFileInfo::exists(dir + QStringLiteral("/index.html"))) return false;
+#ifdef Q_OS_LINUX
+    const uint owner = info.ownerId();
+    if (owner != 0 && owner != uint(geteuid())) {
+        qWarning("omamap: ignoring %s: owned by another user", qPrintable(dir));
+        return false;
+    }
+    if (info.permission(QFileDevice::WriteGroup) || info.permission(QFileDevice::WriteOther)) {
+        qWarning("omamap: ignoring %s: writable by other users", qPrintable(dir));
+        return false;
+    }
+#endif
+    return true;
+}
+
 static QString coreDirectory()
 {
+    // An explicit override is the developer's choice (see SECURITY.md).
     const QString override = qEnvironmentVariable("OMAMAP_CORE_DIR");
     if (!override.isEmpty()) return override;
-    // A binary running from its build directory uses this checkout's core;
-    // installed binaries look next to themselves (relocatable installs), then
-    // in the configured prefix.
     const QString appDir = QCoreApplication::applicationDirPath();
-    if (QDir(appDir) == QDir(QStringLiteral(OMAMAP_BUILD_DIR)) && QFileInfo::exists(QStringLiteral(OMAMAP_SOURCE_CORE "/index.html")))
-        return QDir(QStringLiteral(OMAMAP_SOURCE_CORE)).canonicalPath();
+#ifdef OMAMAP_SOURCE_CORE
+    // Development builds: a binary running from its build directory uses
+    // this checkout's core.
+    if (QDir(appDir) == QDir(QStringLiteral(OMAMAP_BUILD_DIR))) {
+        const QString source = QDir(QStringLiteral(OMAMAP_SOURCE_CORE)).canonicalPath();
+        if (!source.isEmpty() && trustedCore(source)) return source;
+    }
+#endif
+    // Installed binaries look next to themselves (relocatable installs), then
+    // in the configured prefix. Never in the source tree they were built from.
     for (const QString &candidate : {appDir + QStringLiteral("/../share/omamap/core"),
-                                     QStringLiteral(OMAMAP_INSTALLED_CORE),
-                                     QStringLiteral(OMAMAP_SOURCE_CORE)}) {
-        if (QFileInfo::exists(candidate + QStringLiteral("/index.html"))) return QDir(candidate).canonicalPath();
+                                     QStringLiteral(OMAMAP_INSTALLED_CORE)}) {
+        const QString dir = QDir(candidate).canonicalPath();
+        if (!dir.isEmpty() && trustedCore(dir)) return dir;
     }
     return {};
 }

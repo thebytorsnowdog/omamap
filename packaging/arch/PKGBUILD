@@ -17,7 +17,7 @@ checkdepends=(nodejs)
 _src="$startdir/../.."
 
 build() {
-  cmake -S "$_src/host" -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+  cmake -S "$_src/host" -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DOMAMAP_DEV_CORE=OFF
   cmake --build build
 }
 
