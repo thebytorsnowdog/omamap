@@ -406,6 +406,42 @@ function fixtures(dir) {
     assert.deepEqual(r.restored, ["p1", "p2", "p3"]);
   });
 
+  await check("KML and GPX inside a ZIP, and KMZ files, open as datasets", async () => {
+    const fflate = require(path.join(CORE, "vendor/fflate.js"));
+    const kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><name>Pier</name><Point><coordinates>-3.2,55.9</coordinates></Point></Placemark><Placemark><LineString><coordinates>-3.2,55.9 -3.1,55.95</coordinates></LineString></Placemark></kml>';
+    const gpx = '<?xml version="1.0"?><gpx version="1.1" creator="t"><wpt lat="55.9" lon="-3.3"><name>Start</name></wpt></gpx>';
+    const dir = path.join(OUT, "fixtures-xml-zip"); fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "bundle.zip"), fflate.zipSync({ "doc.kml": fflate.strToU8(kml), "walk.gpx": fflate.strToU8(gpx) }));
+    fs.writeFileSync(path.join(dir, "trip.kmz"), fflate.zipSync({ "doc.kml": fflate.strToU8(kml), "files/icon.png": new Uint8Array([1, 2, 3]) }));
+    await page.evaluate(() => { clearAll(); document.querySelectorAll(".toast").forEach((t) => t.remove()); });
+    await page.setInputFiles("#file-input", [path.join(dir, "bundle.zip"), path.join(dir, "trip.kmz")]);
+    await page.waitForFunction(() => STATE.datasets.length === 3 && document.getElementById("loading").hidden);
+    const r = await page.evaluate(() => ({ sets: STATE.datasets.map((d) => d.name + ":" + d.featureCount).sort(), errors: document.querySelectorAll(".toast.err").length }));
+    assert.deepEqual(r.sets, ["bundle / doc:2", "bundle / walk:1", "trip:2"]);
+    assert.equal(r.errors, 0);
+  });
+
+  await check("a large KML converts in slices and Cancel stops it", async () => {
+    await page.evaluate(() => { clearAll(); document.querySelectorAll(".toast").forEach((t) => t.remove()); });
+    const r = await page.evaluate(async () => {
+      let kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>';
+      for (let i = 0; i < 40000; i++) kml += "<Placemark><name>P" + i + "</name><Point><coordinates>" + (-4 + (i % 200) * 0.01) + "," + (55 + Math.floor(i / 200) * 0.005) + "</coordinates></Point></Placemark>";
+      kml += "</Document></kml>";
+      let frames = 0, counting = true;
+      const tick = () => { frames++; if (counting) requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+      const loading = handleFiles([new File([kml], "big.kml")]);
+      await new Promise((res) => setTimeout(res, 150));
+      cancelledLoad = true;
+      await loading;
+      counting = false;
+      return { frames, datasets: STATE.datasets.length, warn: Array.from(document.querySelectorAll(".toast.warn")).map((t) => t.textContent).join(" ") };
+    });
+    assert.equal(r.datasets, 0);
+    assert.match(r.warn, /cancelled/i);
+    assert.ok(r.frames >= 2, "the page kept painting while the KML converted (" + r.frames + " frames)");
+  });
+
   // Draw a row of points with each renderer and check the pixels land where
   // Leaflet says the points are.
   for (const renderer of ["webgl", "2d"]) {

@@ -62,13 +62,13 @@ Fields from every feature are included, even when they first appear late in a da
 ### Formats
 
 - **GeoJSON** (`.geojson`, `.json`) in WGS84 longitude/latitude.
-- **KML** and **GPX**.
+- **KML**, **KMZ** and **GPX**, also inside a ZIP alongside other layers.
 - **CSV** with latitude/longitude columns (`lat`/`lon`, `latitude`/`longitude`), or British National Grid easting/northing (`easting`/`northing`, or `x`/`y` holding grid values). Cells stay as text.
 - **Shapefiles**, either zipped or as loose `.shp` + `.dbf` (+ `.prj`, `.cpg`) files dropped together. A `.prj` file is used to reproject to WGS84. A ZIP with several layers opens as one dataset per layer.
 
 British National Grid data (EPSG:27700) is converted to WGS84 automatically, to within about 5 m (the same 7-parameter method PROJ uses without grid files). That covers easting/northing CSV, GeoJSON that declares EPSG:27700 (as older QGIS exports do), and shapefiles with a BNG `.prj`. The dataset list notes when a conversion happened.
 
-Imports are validated before anything reaches the map. Malformed geometry, unsafe property names, ZIP bombs, inconsistent archives and shapefile headers that don't fit their file are rejected with a reason. Parsing runs in a background worker so large files don't freeze the window (KML and GPX are the exception: they are read on the main thread).
+Imports are validated before anything reaches the map. Malformed geometry, unsafe property names, ZIP bombs, inconsistent archives and shapefile headers that don't fit their file are rejected with a reason. Parsing runs in a background worker so large files don't freeze the window. KML and GPX need the page's XML parser, so they are converted on the main thread in short slices: the window keeps painting and Cancel works, apart from one pause while the XML itself is read.
 
 Limits: 100 MiB per file, 50 MiB per ZIP (250 MiB expanded, at most 50 layers and 1,000,000 features across them), 500,000 features, 5 million coordinates, 1,000 attribute names and 500 attributes per feature per dataset, 10 million values per CSV or shapefile table, and about 200 MiB of attribute data per dataset (attribute names count once per dataset, so a 200,000 × 20 CSV fits comfortably), 50 datasets.
 
