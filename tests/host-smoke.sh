@@ -165,9 +165,30 @@ else
   echo "✖ the recent-files list is private to the user: $(stat -c '%a %n' "$recent" "$(dirname "$recent")")"; fail=1
 fi
 
+# Installed binaries read the core next to themselves, never the checkout
+# they were built from, and refuse a core other users could modify.
+reloc=$(mktemp -d)
+mkdir -p "$reloc/bin" "$reloc/share/omamap"
+cp "$bin" "$reloc/bin/omamap"
+cp -r core "$reloc/share/omamap/core"
+chmod 775 "$reloc/share/omamap/core"
+refused=$(OMAMAP_SELFTEST=1 timeout -k 5 30 "$reloc/bin/omamap" --new-window 2>&1 | grep -c 'writable by other users' || true)
+chmod 755 "$reloc/share/omamap/core"
+out=$(OMAMAP_SELFTEST=1 timeout -k 5 60 "$reloc/bin/omamap" --new-window $fix/park.geojson 2>> "$hostlog" | tail -1)
+rm -rf "$reloc"
+if (( refused > 0 )) && [[ $out == *'park:1'* ]]; then
+  echo "✔ an installed binary only loads a core other users cannot change"
+else
+  echo "✖ an installed binary only loads a core other users cannot change: refused=$refused, $out"; fail=1
+fi
+
 # Page-level checks: headers, tokens, permissions, windows and navigation.
 probe='(async function () {
   const r = [];
+  // Record the file URL the host hands over (a second launch sends park.geojson).
+  let shared = null;
+  const realFetch = window.fetch;
+  window.fetch = function (u) { if (/\/file\/[0-9a-f]{32}\//.test(String(u))) shared = String(u); return realFetch.apply(this, arguments); };
   const to = (p) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error("timeout")), 1500))]);
   const step = async (name, fn) => { try { r.push(name + "=" + await to(fn())); } catch (e) { r.push(name + "!" + e.name); } };
   await step("csp", () => fetch("index.html").then((x) => /frame-ancestors .none./.test(x.headers.get("content-security-policy")) && x.headers.get("x-content-type-options")));
@@ -178,18 +199,27 @@ probe='(async function () {
   await step("popup", async () => window.open("https://example.com/popup") === null);
   const click = (href) => { const a = document.createElement("a"); a.href = href; document.body.appendChild(a); a.click(); a.remove(); };
   click("file:///etc/passwd"); click("steam://run/1"); click("omamap://app/vendor/leaflet.js"); click("https://example.com/link");
+  for (let i = 0; i < 100 && !shared; i++) await new Promise((ok) => setTimeout(ok, 100));
+  await new Promise((ok) => setTimeout(ok, 1000));
+  await step("reuse", () => shared ? realFetch(shared).then((x) => x.status) : Promise.resolve("none"));
   setTimeout(() => toast("probe " + r.join(" "), "", "err"), 1500);
 })();'
 log=$(mktemp)
-out=$(OMAMAP_DEBUG=1 QT_FORCE_STDERR_LOGGING=1 OMAMAP_SELFTEST=1 OMAMAP_SELFTEST_DELAY=12000 \
-  OMAMAP_SELFTEST_JS="$probe" timeout -k 5 60 "$bin" --new-window $fix/park.geojson 2>"$log" | tail -1)
-token_url=$(grep -o 'omamap://app/file/[0-9a-zA-Z]*/park.geojson' "$log" | head -1 || true)
+page=$(mktemp)
+OMAMAP_DEBUG=1 QT_FORCE_STDERR_LOGGING=1 OMAMAP_SELFTEST=1 OMAMAP_SELFTEST_DELAY=18000 \
+  OMAMAP_SELFTEST_JS="$probe" timeout -k 5 60 "$bin" > "$page" 2>"$log" &
+first=$!
+sleep 7
+timeout -k 5 10 "$bin" $fix/park.geojson 2>> "$hostlog" || true
+wait $first || true
+out=$(tail -1 "$page"); rm -f "$page"
+token_url=$(grep -oE 'omamap://app/file/[0-9a-f]{32}/park.geojson' "$log" | head -1 || true)
 external=$(grep -o '\[open-external\] .*' "$log" | tr '\n' ' ' || true)
-want='csp=nosniff guess=404 clipboard!NotAllowedError geo=code1 notify=denied popup=true'
+want='csp=nosniff guess=404 clipboard!NotAllowedError geo=code1 notify=denied popup=true reuse=404'
 if [[ $out == *"probe $want"* && $out == *'park:1'* && $token_url =~ /file/[0-9a-f]{32}/ && $external == '[open-external] https://example.com/link ' ]]; then
-  echo "✔ the host locks down headers, file tokens, permissions, windows and navigation"
+  echo "✔ the host locks down headers, single-use file tokens, permissions, windows and navigation"
 else
-  echo "✖ the host locks down headers, file tokens, permissions, windows and navigation:"
+  echo "✖ the host locks down headers, single-use file tokens, permissions, windows and navigation:"
   echo "    page: $out"; echo "    file url: $token_url"; echo "    opened externally: $external"; fail=1
 fi
 rm -f "$log"

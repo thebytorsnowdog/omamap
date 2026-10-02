@@ -46,6 +46,11 @@ QString SchemeHandler::shareFile(const QString &absolutePath)
     return QStringLiteral("%1://%2/file/%3/%4").arg(Scheme, Host, token, name);
 }
 
+void SchemeHandler::revokeAll()
+{
+    m_files.clear();
+}
+
 static QByteArray mimeFor(const QString &path)
 {
     static const QHash<QString, QByteArray> known = {
@@ -72,7 +77,8 @@ void SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
     static const QRegularExpression fileRoute(QStringLiteral("^/file/([0-9a-f]{32})/"));
     const auto match = fileRoute.match(path);
     if (match.hasMatch()) {
-        const QString target = m_files.value(match.captured(1));
+        const QString token = match.captured(1);
+        const QString target = m_files.value(token);
         const QUrl from = job->initiator();
         if (from.scheme() != QLatin1String(Scheme) || from.host() != QLatin1String(Host)) {
             job->fail(QWebEngineUrlRequestJob::RequestDenied);
@@ -89,6 +95,9 @@ void SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
             job->fail(QWebEngineUrlRequestJob::UrlNotFound);
             return;
         }
+        // Single use: the page reads each opened file once, so a URL that
+        // leaked (a log, a crash report, a later page) is worth nothing.
+        m_files.remove(token);
         // Data, never a document: if anything navigated here it could not run.
         job->setAdditionalResponseHeaders({
             {"Content-Security-Policy", "sandbox; default-src 'none'"},
