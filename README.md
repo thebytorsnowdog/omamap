@@ -76,7 +76,7 @@ Limits: 100 MiB per file, 50 MiB per ZIP (250 MiB expanded, at most 50 layers an
 
 The whole workspace is also limited to 1 million features, 10 million coordinates, and 512 MiB of estimated data and rendering structures. This estimate is an admission budget, not a limit on the process's actual memory use. The table's search-text cache is limited to 16 MiB per dataset.
 
-Point datasets are drawn on the GPU (WebGL), so hundreds of thousands of points pan and zoom smoothly. Where WebGL isn't available, a 2D fallback is used. Lines and polygons use Leaflet's canvas renderer, which handles tens of thousands of shapes comfortably.
+Point datasets are drawn on the GPU (WebGL), so hundreds of thousands of points pan and zoom smoothly. Where WebGL isn't available, a 2D fallback is used. Lines and polygons use Leaflet's canvas renderer, which handles tens of thousands of shapes comfortably. In a dataset of 2,000 or more lines or polygons, any shape no more than 3 pixels across at the current zoom is drawn as a small solid rectangle. That covers the same area, in the outline colour, as Leaflet's round-cornered blob, and makes zoomed-out redraws of dense layers about four to six times faster. At that size the two look alike: zoom in and every shape is drawn in full. Smaller datasets, and the selected feature, are always drawn in full.
 
 Single-point features keep the fast renderer in mixed datasets too. GPU point positions stay in reusable buffers during navigation, and a spatial index narrows click selection to nearby candidates. File imports build layers in batches; Cancel also stops that stage.
 
@@ -147,7 +147,7 @@ OmaMap's window class is `omamap`.
 ## Develop
 
 ```text
-core/      web app: index.html, app.js (map, datasets, inspector),
+core/      web app: index.html, app.js (map, datasets, inspector), batchcanvas.js (large-layer drawing),
            parse.js (validation and parsing), parse-worker.js, vendor/
 host/      Qt 6 WebEngine shell: omamap:// scheme, theme watcher, single instance,
            profile save dialog, recent files

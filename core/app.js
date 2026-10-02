@@ -228,6 +228,8 @@ function styleFeatureLayer(layer, ds, selected, cache) {
       st = leafStyle(leaf, colour, ds.style, selected);
       if (cache) cache.set(key, st);
     }
+    // The selection is always drawn in full (batchcanvas.js).
+    if (leaf._omaBatch && leaf._omaHighlight !== !!selected) leaf._omaHighlight = !!selected;
     leaf.setStyle(st);
   });
 }
@@ -308,6 +310,17 @@ function* prepareDataset(parsed, base) {
     if (f.geometry.type === "Point") points.push({latlng:L.latLng(f.geometry.coordinates[1],f.geometry.coordinates[0]), feature:f, index:i});
     else { featureIndex = i; paths.addData(f); }
     if (i % 512 === 0) yield;
+  }
+  // Large vector datasets draw their tiny shapes as rectangles (batchcanvas.js).
+  if (geojson.features.length - points.length >= OmaBatch.MIN_FEATURES) {
+    const mark = function (leaf) {
+      if (!(leaf instanceof L.Polyline)) return;
+      leaf._omaBatch = true; leaf._omaHighlight = false;
+    };
+    for (let i = 0; i < layers.length; i++) {
+      if (layers[i]) eachLeaf(layers[i], mark);
+      if (i % 2048 === 0) yield;
+    }
   }
   let layer = paths;
   if (points.length) {
@@ -1198,7 +1211,7 @@ function wireKeys() {
 }
 
 function initMap() {
-  STATE.renderer = L.canvas({ padding: 0.5, tolerance: 4 });
+  STATE.renderer = OmaBatch.canvas({ padding: 0.5, tolerance: 4 });
   STATE.map = L.map("map", {
     preferCanvas: true, renderer: STATE.renderer, zoomControl: true, attributionControl: true,
     worldCopyJump: true, minZoom: 2, maxZoom: 22, zoomSnap: 0.5, boxZoom: true

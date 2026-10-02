@@ -6,7 +6,7 @@ import fs from "node:fs";
 import js from "@eslint/js";
 import globals from "globals";
 
-const CORE = ["fastpoints.js", "spatial.js", "parse.js", "basemaps.js", "style.js", "table.js", "app.js"];
+const CORE = ["fastpoints.js", "batchcanvas.js", "spatial.js", "parse.js", "basemaps.js", "style.js", "table.js", "app.js"];
 const VENDOR = { L: "readonly", toGeoJSON: "readonly", Papa: "readonly", fflate: "readonly", shp: "readonly" };
 // Set on the global object rather than declared: parse.js is a UMD-style
 // module (also loaded by Node and the worker) and app.js exports OmaMap.
