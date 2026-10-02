@@ -158,8 +158,9 @@ tests/     parser tests (Node), browser tests (Playwright), host smoke test
 cmake -S host -B build && cmake --build build
 ./build/omamap --new-window some.geojson     # runs against core/ in this checkout
 
-npm install                 # playwright-core, for the browser tests
-npm test                    # parser, validation, bar widget and vendor-hash tests
+npm install                 # playwright-core and ESLint, for the browser tests and lint
+npm run lint                # ESLint over core/ and tests/ (catches undefined names across the core scripts)
+npm test                    # parser, validation, bar widget, tile-host and vendor-hash tests
 npm run test:browser        # drives core/ in Chromium, incl. hostile-input tests (CHROMIUM=/usr/bin/chromium)
 ctest --test-dir build --output-on-failure # native profile-save and recent-list tests
 tests/host-smoke.sh         # headless checks of the native host and its hardening (run test:browser first)
