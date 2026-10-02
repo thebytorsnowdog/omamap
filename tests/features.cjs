@@ -373,6 +373,39 @@ function fixtures(dir) {
     assert.deepEqual(await page.evaluate(() => STATE.datasets.map((d) => d.name)), ["next"]);
   });
 
+  await check("cancelling a profile restore leaves the open workspace untouched", async () => {
+    const r = await page.evaluate(async () => {
+      clearAll();
+      const pts = (n, x) => ({ type: "FeatureCollection", features: Array.from({ length: n }, (_, i) => ({ type: "Feature", geometry: { type: "Point", coordinates: [x + (i % 300) * 0.001, 55 + Math.floor(i / 300) * 0.001] }, properties: { id: i } })) });
+      addDataset({ name: "keep A", geojson: pts(10, -4) });
+      addDataset({ name: "keep B", geojson: pts(10, -3) });
+      STATE.map.stop(); STATE.map.setView([55, -3.5], 8, { animate: false });
+      const before = STATE.map.getCenter();
+      const profile = { omamap: "profile", version: 1, view: { lat: 10, lng: 10, zoom: 5 }, basemap: "none",
+        datasets: [{ name: "p1", geojson: pts(60000, 1) }, { name: "p2", geojson: pts(60000, 2) }, { name: "p3", geojson: pts(60000, 3) }] };
+      const parsed = await OmaParse.parseBytes("w.omamap", new TextEncoder().encode(JSON.stringify(profile)).buffer);
+      cancelledLoad = false;
+      const restoring = restoreProfile(parsed);
+      setTimeout(() => { cancelledLoad = true; }, 30);
+      let error = null;
+      try { await restoring; } catch (e) { error = e instanceof LoadCancelled ? "cancelled" : e.message; }
+      cancelledLoad = false;
+      const kept = STATE.datasets.map((d) => d.name);
+      const onMap = STATE.datasets.every((d) => STATE.map.hasLayer(d.layer));
+      const pointLayers = Object.values(STATE.map._layers).filter((l) => l instanceof FastPoints).length;
+      const after = STATE.map.getCenter();
+      // A complete restore still works afterwards.
+      await restoreProfile(parsed);
+      return { error, kept, onMap, pointLayers, moved: before.distanceTo(after) > 1, restored: STATE.datasets.map((d) => d.name) };
+    });
+    assert.equal(r.error, "cancelled");
+    assert.deepEqual(r.kept, ["keep A", "keep B"]);
+    assert.equal(r.onMap, true);
+    assert.equal(r.pointLayers, 2, "no half-restored layers remain on the map");
+    assert.equal(r.moved, false, "the saved view was not applied");
+    assert.deepEqual(r.restored, ["p1", "p2", "p3"]);
+  });
+
   // Draw a row of points with each renderer and check the pixels land where
   // Leaflet says the points are.
   for (const renderer of ["webgl", "2d"]) {
