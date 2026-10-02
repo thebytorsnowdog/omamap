@@ -726,6 +726,76 @@ function fixtures(dir) {
     assert.ok(r.x < r.panelLeft, "feature at " + Math.round(r.x) + " is left of the panel at " + Math.round(r.panelLeft));
   });
 
+  /* ------------------------ large-layer fast path ------------------------ */
+  await check("large polygon layers draw tiny shapes as matching rectangles; small layers draw as before", async () => {
+    const r = await page.evaluate(async ([big, small]) => {
+      clearAll();
+      const frame = () => new Promise((res) => requestAnimationFrame(() => setTimeout(res, 0)));
+      const B = addDataset({ name: "dense", geojson: big }), S = addDataset({ name: "few", geojson: small });
+      const marked = { big: B.layers.every((l) => l._omaBatch === true), small: S.layers.some((l) => l._omaBatch) };
+      STATE.map.setView([55.75, -3.5], 9, { animate: false }); await frame();
+      const R = STATE.renderer, ctx = R._ctx, cv = R._container;
+      const coverage = () => { const d = ctx.getImageData(0, 0, cv.width, cv.height).data; let s = 0; for (let i = 3; i < d.length; i += 4) s += d[i]; return s / 255; };
+      const full = () => { R._redrawBounds = null; R._redraw(); };
+      const tinyOnScreen = B.layers.filter((l) => l._parts.length && l._rawPxBounds.max.x - l._rawPxBounds.min.x <= OmaBatch.TINY_PX && l._rawPxBounds.max.y - l._rawPxBounds.min.y <= OmaBatch.TINY_PX).length;
+      // Count which layers Leaflet draws itself.
+      let drawn = new Set();
+      const spy = (l) => { const f = l._updatePath; l._updatePath = function () { drawn.add(this); return f.apply(this, arguments); }; };
+      B.layers.forEach(spy); S.layers.forEach(spy);
+      full();
+      const fastCov = coverage();
+      const leafletDrawn = { big: B.layers.filter((l) => drawn.has(l)).length, small: S.layers.filter((l) => drawn.has(l) || !l._parts.length).length };
+      // The same picture drawn entirely by Leaflet.
+      B.layers.forEach((l) => { l._omaBatch = false; }); full();
+      const leafletCov = coverage();
+      B.layers.forEach((l) => { l._omaBatch = true; }); full();
+      // Hit-testing and the selection highlight still work on a tiny shape.
+      const tiny = B.layers.find((l) => l._parts.length && l._rawPxBounds.max.x - l._rawPxBounds.min.x <= 1.5);
+      onMapClick({ layerPoint: tiny._rawPxBounds.getCenter() });
+      const hit = STATE.hits.some((h) => h.layer === tiny);
+      drawn = new Set(); full();
+      const selectedInFull = drawn.has(STATE.hits[0].layer) && STATE.hits[0].layer._omaHighlight === true;
+      clearSelection();
+      const unflagged = tiny._omaHighlight === false;
+      // Restyle and visibility reach the fast path.
+      const px = (l) => { const p = l._rawPxBounds.getCenter().subtract(R._bounds.min).multiplyBy(window.devicePixelRatio || 1); return Array.from(ctx.getImageData(Math.round(p.x), Math.round(p.y), 1, 1).data); };
+      B.style.colour = "#ff0000"; B.style.byField = null; applyDatasetStyle(B); await frame(); await frame();
+      const red = px(tiny);
+      B.style.outline = "none"; B.style.colour = "#0000ff"; B.style.fillOpacity = 1; applyDatasetStyle(B); await frame(); await frame();
+      const unoutlined = coverage();
+      B.layers.forEach((l) => { l._omaBatch = false; }); full();
+      const unoutlinedLeaflet = coverage();
+      B.layers.forEach((l) => { l._omaBatch = true; }); full();
+      B.style.outline = "same"; applyDatasetStyle(B); await frame(); await frame();
+      toggleVisible(B.id); await frame(); await frame();
+      const hidden = px(tiny);
+      toggleVisible(B.id); await frame(); await frame();
+      const shown = px(tiny);
+      // Zoomed in, shapes are no longer tiny and Leaflet draws them in full.
+      STATE.map.setView(tiny.getBounds().getCenter(), 15, { animate: false }); await frame();
+      drawn = new Set(); full();
+      const zoomedFull = B.layers.filter((l) => l._parts.length).every((l) => drawn.has(l));
+      clearAll();
+      return { marked, tinyOnScreen, leafletDrawn, smallCount: S.layers.length, ratio: fastCov / leafletCov, hit, selectedInFull, unflagged, red, unoutlined: unoutlined / Math.max(1, unoutlinedLeaflet), unoutlinedLeaflet, hidden, shown, zoomedFull };
+    }, [plots(3000, 0.002, -4.5, 55.5, 2), plots(30, 0.002, -3.0, 55.6, 0.2)]);
+    assert.deepEqual(r.marked, { big: true, small: false }, "only the large dataset opts in");
+    assert.ok(r.tinyOnScreen > 2500, "most shapes are tiny at this zoom (" + r.tinyOnScreen + ")");
+    assert.ok(r.leafletDrawn.big < 100, "tiny shapes skip Leaflet's path drawing (" + r.leafletDrawn.big + ")");
+    assert.equal(r.leafletDrawn.small, r.smallCount, "small datasets are drawn by Leaflet as before");
+    assert.ok(r.ratio > 0.9 && r.ratio < 1.1, "painted area matches Leaflet's within 10% (ratio " + r.ratio.toFixed(3) + ")");
+    assert.equal(r.hit, true, "a tiny shape is still hit by a click");
+    assert.equal(r.selectedInFull, true, "the selection is drawn in full by Leaflet");
+    assert.equal(r.unflagged, true, "deselecting returns it to the fast path");
+    assert.ok(r.red[0] > 200 && r.red[1] < 90 && r.red[3] > 200, "restyle repaints tiny shapes: " + r.red);
+    // Without an outline only the fill shows; Leaflet has collapsed most of these
+    // shapes to lines, which have no fill area, and the fast path agrees.
+    assert.ok(r.unoutlinedLeaflet < 50 ? r.unoutlined * Math.max(1, r.unoutlinedLeaflet) < 50 : r.unoutlined > 0.85 && r.unoutlined < 1.15,
+      "unoutlined shapes paint like Leaflet's (ratio " + r.unoutlined + ", Leaflet " + r.unoutlinedLeaflet + ")");
+    assert.equal(r.hidden[3], 0, "hiding the dataset clears them");
+    assert.ok(r.shown[3] > 200, "showing it draws them again");
+    assert.equal(r.zoomedFull, true, "zoomed in, every shape is drawn by Leaflet");
+  });
+
   await check("no page errors", async () => { assert.deepEqual(errors, []); });
 
   await browser.close();
