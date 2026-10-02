@@ -51,7 +51,18 @@ const N_POINTS = Number(process.env.BENCH_POINTS || 100000), N_POLYS = Number(pr
     await measure("colour points by category", async () => { setColourBy(P, "owner", "categories"); applyDatasetStyle(P); renderLegend(); });
     await measure("colour points by ranges", async () => { setColourBy(P, "risk", "ranges"); applyDatasetStyle(P); renderLegend(); });
     await measure("theme switch", async () => OmaMap.applyTheme({ mode: "light", colors: { background: "#eeeeee", accent: "#0055ff", green: "#00aa00", blue: "#3366ff" } }));
-    await measure("click identify", async () => { const c = STATE.map.getSize().divideBy(2); onMapClick({ layerPoint: STATE.map.containerPointToLayerPoint(c) }); });
+    const clickCentre = () => { const c = STATE.map.getSize().divideBy(2); onMapClick({ layerPoint: STATE.map.containerPointToLayerPoint(c) }); };
+    await measure("click identify", async () => { clickCentre(); });
+    await measure("close panel (Esc)", async () => { clearSelection(); });
+    await measure("click identify (panel reopens)", async () => { clickCentre(); });
+    await measure("click another feature", async () => { const c = STATE.map.getSize().divideBy(2).add([40, 25]); onMapClick({ layerPoint: STATE.map.containerPointToLayerPoint(c) }); });
+    clearSelection();
+    // Full repaint of the vector canvas (what a pan end, resize or restyle costs).
+    const fullRedraw = () => { const r = STATE.renderer; r._redrawBounds = null; const t = performance.now(); r._redraw(); return performance.now() - t; };
+    { const runs = []; for (let i = 0; i < 7; i++) { await frame(); runs.push(fullRedraw()); } runs.sort((a, b) => a - b);
+      out.push({ name: "vector canvas full redraw (median|worst)", ms: Math.round(runs[3]), freeze: Math.round(runs[6]) }); }
+    await measure("zoom out (painted)", async () => { STATE.map.setZoom(STATE.map.getZoom() - 1, { animate: false }); });
+    await measure("pan back (painted)", async () => { STATE.map.panBy([-300, 0], { animate: false }); });
     await measure("open table (points)", async () => { Table.open(P); });
     await measure("table search", async () => { Table.query = "asset 9999"; Table.refilter(); });
     await measure("table clear search", async () => { Table.query = ""; Table.refilter(); });
