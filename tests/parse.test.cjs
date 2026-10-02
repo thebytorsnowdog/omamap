@@ -478,3 +478,23 @@ test("attribute data beyond the budget is refused with a clear reason", () => {
   const features = Array.from({ length: 1300 }, () => ({ type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: { a: big } }));
   assert.throws(() => P.validateFeatureCollection({ type: "FeatureCollection", features }), /200 MiB attribute budget after [\d,]+ features\. Remove unused columns/);
 });
+
+test("KML and GPX inside a ZIP or KMZ come back for the page to convert", async () => {
+  const kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><Point><coordinates>-1,51</coordinates></Point></Placemark></kml>';
+  const gpx = '<?xml version="1.0"?><gpx version="1.1" creator="t"><wpt lat="51" lon="-1"/></gpx>';
+  const pt = JSON.stringify({ type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: {} });
+  const zip = fflate.zipSync({ "doc.kml": fflate.strToU8(kml), "walk.gpx": fflate.strToU8(gpx), "p.geojson": fflate.strToU8(pt) });
+  const layers = await P.parseBytes("mixed.zip", zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength));
+  assert.deepEqual(layers.map((l) => l.name).sort(), ["mixed / doc", "mixed / p", "mixed / walk"]);
+  const xml = layers.filter((l) => l.xml).map((l) => l.xml.ext).sort();
+  assert.deepEqual(xml, ["gpx", "kml"]);
+  const kmz = fflate.zipSync({ "doc.kml": fflate.strToU8(kml) });
+  const only = await P.parseBytes("trip.kmz", kmz.buffer.slice(kmz.byteOffset, kmz.byteOffset + kmz.byteLength));
+  assert.equal(only.length, 1); assert.equal(only[0].name, "trip"); assert.equal(only[0].xml.items, 1);
+  const bad = fflate.zipSync({ "doc.kml": fflate.strToU8('<!DOCTYPE x [<!ENTITY a "b">]>' + kml) });
+  await assert.rejects(P.parseBytes("bad.kmz", bad.buffer.slice(bad.byteOffset, bad.byteOffset + bad.byteLength)), /DOCTYPE/);
+  // Converted on the page; totals are re-checked with exact counts.
+  const two = [{ xml: { text: "", ext: "kml" } }, { xml: { text: "", ext: "kml" } }];
+  const run = () => ({ type: "FeatureCollection", features: new Array(600000).fill(0) });
+  await assert.rejects(P.resolveXmlLayers(two, run), /together exceed/);
+});

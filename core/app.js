@@ -899,16 +899,18 @@ function readBuffer(file) {
 
 async function parseOne(file) {
   const ext = OmaParse.extOf(file.name);
-  const limit = ext === "zip" ? OmaParse.LIMITS.zipBytes : OmaParse.LIMITS.fileBytes;
+  const limit = ext === "zip" || ext === "kmz" ? OmaParse.LIMITS.zipBytes : OmaParse.LIMITS.fileBytes;
   if (typeof file.size === "number" && file.size > limit) throw new Error("File is too large (limit " + Math.round(limit / 1048576) + " MiB).");
   const buffer = await readBuffer(file);
   if (ext === "kml" || ext === "gpx") {
-    // XML formats need DOMParser, which workers lack.
+    // XML formats need DOMParser, which workers lack: convert on the page,
+    // in slices so the window stays responsive and Cancel works.
     if (buffer.byteLength > OmaParse.LIMITS.fileBytes) throw new Error("File is too large.");
     const text = new TextDecoder("utf-8").decode(buffer);
-    return [{ name: OmaParse.baseName(file.name), geojson: OmaParse.xmlToGeoJSON(text, ext) }];
+    return [{ name: OmaParse.baseName(file.name), geojson: await runSliced(OmaParse.xmlToGeoJSONSteps(text, ext)) }];
   }
-  return Parser.run({ kind: "file", name: file.name, buffer: buffer }, [buffer]);
+  // KML / GPX inside a ZIP or KMZ come back as text for the page to convert.
+  return OmaParse.resolveXmlLayers(await Parser.run({ kind: "file", name: file.name, buffer: buffer }, [buffer]), runSliced);
 }
 
 async function parseShapefileSet(stem, group) {
