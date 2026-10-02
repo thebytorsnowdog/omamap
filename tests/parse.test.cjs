@@ -250,6 +250,22 @@ test("profile style values are cleaned, and unsafe fields dropped", async () => 
   assert.equal(st.byField, null);
 });
 
+test("profile dataset warnings are kept, cleaned and capped", async () => {
+  const many = Array.from({ length: 30 }, (_, i) => "note " + i);
+  const p = await P.parseBytes("w.omamap", bytes(profileOf({ datasets: [
+    { name: "A", warnings: ["No .prj file: coordinates were assumed to be WGS84.", "bad\u0000\nline", 7, { html: "<b>" }, "", "x".repeat(1000)], geojson: JSON.parse(POINT_FC) },
+    { name: "B", warnings: many, geojson: JSON.parse(POINT_FC) },
+    { name: "C", warnings: "not a list", geojson: JSON.parse(POINT_FC) },
+    { name: "D", geojson: JSON.parse(POINT_FC) }] })));
+  const [a, b, c, d] = p.datasets;
+  assert.deepEqual(a.warnings.slice(0, 2), ["No .prj file: coordinates were assumed to be WGS84.", "bad  line"]);
+  assert.equal(a.warnings.length, 3);
+  assert.equal(a.warnings[2].length, 300);
+  assert.equal(b.warnings.length, 20);
+  assert.deepEqual(c.warnings, []);
+  assert.deepEqual(d.warnings, []);
+});
+
 test("profiles with bad data or from a newer version are rejected", async () => {
   await assert.rejects(P.parseBytes("x.omamap", bytes(profileOf({ version: 99 }))), /newer OmaMap/);
   await assert.rejects(P.parseBytes("x.omamap", bytes(profileOf({ datasets: [{ name: "Bad", geojson: { type: "Point", coordinates: [500, 500] } }] }))), /Bad.*WGS84/);

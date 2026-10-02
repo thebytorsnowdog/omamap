@@ -1023,6 +1023,7 @@ function buildProfile() {
         name: ds.name,
         visible: ds.visible,
         slot: ds.slot,
+        warnings: ds.warnings.slice(0, 20),
         style: {
           colour: st.colour, fillOpacity: st.fillOpacity, weight: st.weight, radius: st.radius, outline: st.outline,
           byField: bf ? { field: bf.field, mode: bf.mode, reverse: bf.reverse } : null

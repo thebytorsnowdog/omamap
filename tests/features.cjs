@@ -284,7 +284,7 @@ function fixtures(dir) {
     assert.equal(await page.locator("#table-panel").isHidden(), true);
   });
 
-  await check("a saved profile reopens with data, styles, visibility, view and basemap", async () => {
+  await check("a saved profile reopens with data, styles, visibility, warnings, view and basemap", async () => {
     await page.evaluate(() => clearAll());
     await page.setInputFiles("#file-input", [path.join(OUT, "fixtures-features", "assets.geojson"), path.join(OUT, "fixtures-features", "sites.geojson")]);
     await page.waitForFunction(() => STATE.datasets.length === 2 && document.getElementById("loading").hidden);
@@ -295,6 +295,7 @@ function fixtures(dir) {
       sites.style.colour = "#123456"; sites.style.outline = "fg"; sites.style.fillOpacity = 0.6;
       applyDatasetStyle(sites);
       toggleVisible(sites.id);
+      sites.warnings = ["No .prj file: coordinates were assumed to be WGS84."];
       setBasemap("topo", true);
       return { order: STATE.datasets.map((d) => d.name), colours: assets.layers.slice(0, 5).map((l) => l.options.fillColor) };
     });
@@ -314,6 +315,7 @@ function fixtures(dir) {
         order: STATE.datasets.map((d) => d.name), colours: assets.layers.slice(0, 5).map((l) => l.options.fillColor),
         byField: { field: assets.style.byField.field, mode: assets.style.byField.mode, reverse: assets.style.byField.reverse },
         sites: { visible: sites.visible, colour: sites.style.colour, outline: sites.style.outline, fillOpacity: sites.style.fillOpacity },
+        warnings: sites.warnings, warnRows: Array.from(document.querySelectorAll(".layer-warn")).map((w) => w.textContent),
         view: [Math.round(c.lat * 100) / 100, Math.round(c.lng * 100) / 100, STATE.map.getZoom()], basemap: STATE.basemapId
       };
     });
@@ -321,6 +323,8 @@ function fixtures(dir) {
     assert.deepEqual(after.colours, before.colours);
     assert.deepEqual(after.byField, { field: "condition_grade", mode: "categories", reverse: true });
     assert.deepEqual(after.sites, { visible: false, colour: "#123456", outline: "fg", fillOpacity: 0.6 });
+    assert.deepEqual(after.warnings, ["No .prj file: coordinates were assumed to be WGS84."]);
+    assert.deepEqual(after.warnRows, ["⚠ No .prj file: coordinates were assumed to be WGS84."]);
     assert.deepEqual(after.view, [55.95, -3.9, 12]);
     assert.equal(after.basemap, "topo");
   });

@@ -806,6 +806,13 @@
   function cleanNum(v, lo, hi, fallback) { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback; }
   function cleanText(v, max) { return typeof v === "string" ? v.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, max) : ""; }
 
+  // Notes saved with a dataset (assumed CRS, skipped rows): shown as text only.
+  function cleanWarnings(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(function (w) { return typeof w === "string"; }).slice(0, 20)
+      .map(function (w) { return cleanText(w, 300).trim(); }).filter(Boolean);
+  }
+
   function cleanStyle(raw) {
     const st = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
     const out = {
@@ -851,7 +858,7 @@
       catch (e) { throw new Error("Profile dataset “" + name + "”: " + safeMessage(e)); }
       datasets.push({ name: name, geojson: geojson, visible: ds.visible !== false,
         slot: Number.isSafeInteger(ds.slot) && ds.slot >= 0 && ds.slot <= 1000000 ? ds.slot : i,
-        style: wimp ? wimpStyle(ds) : cleanStyle(ds.style), warnings: [] });
+        style: wimp ? wimpStyle(ds) : cleanStyle(ds.style), warnings: cleanWarnings(ds.warnings) });
       checkWorkspace(datasets.map(function (item) { return item.geojson; }));
     });
     let view = null;
