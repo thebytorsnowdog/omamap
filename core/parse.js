@@ -154,9 +154,15 @@
      strings and nesting, and no prototype-pollution key anywhere. Returns the
      value to store (only Dates are replaced). Not copying keeps peak memory
      close to the parsed size, which matters for large files. */
+  function budgetExceeded(budget) {
+    return new Error("Dataset attribute data exceeds the " + Math.round(LIMITS.propertyBytes / 1048576) + " MiB attribute budget" +
+      (budget.features ? " after " + budget.features.toLocaleString() + " features" : "") +
+      ". Remove unused columns or split the file.");
+  }
+
   function checkJsonValue(value, depth, budget) {
     budget.bytes += 16;
-    if (budget.bytes > LIMITS.propertyBytes) throw new Error("Dataset attribute data exceeds the size budget.");
+    if (budget.bytes > LIMITS.propertyBytes) throw budgetExceeded(budget);
     if (depth > 20) throw new Error("Nested property depth exceeds 20.");
     if (value === null || typeof value === "boolean") return value;
     if (typeof value === "number") {
@@ -178,7 +184,10 @@
       if (keys.length > LIMITS.propertiesPerFeature) throw new Error("An object has too many properties.");
       for (let i = 0; i < keys.length; i++) {
         const key = keys[i];
-        budget.bytes += key.length * 2 + 16;
+        // A feature's top-level attribute names repeat on every feature and
+        // share one string, so they are charged once per dataset (see
+        // validateFeatureCollection); each feature pays only for the slot.
+        budget.bytes += depth === 0 ? 8 : key.length * 2 + 16;
         if (FORBIDDEN_PROPERTY_NAMES.indexOf(key) >= 0) throw new Error("Rejected unsafe property name: " + key);
         if (key.length > LIMITS.propertyString) throw new Error("A property name is too long.");
         const v = value[key];
@@ -204,7 +213,7 @@
     const fc = normalizeToFeatureCollection(input);
     if (fc.features.length > LIMITS.features) throw new Error("Dataset exceeds the " + LIMITS.features.toLocaleString() + " feature limit.");
     const counter = { count: 0 };
-    const budget = { bytes: 0 };
+    const budget = { bytes: 0, features: 0 };
     // Every distinct attribute name becomes a table column and a "colour by"
     // choice, so a dataset may not invent an unbounded number of them.
     const fields = new Set();
@@ -219,6 +228,7 @@
         for (const key in props) {
           if (!fields.has(key)) {
             fields.add(key);
+            budget.bytes += key.length * 2 + 16;
             if (fields.size > LIMITS.fieldsPerDataset) throw new Error("Dataset has more than " + LIMITS.fieldsPerDataset.toLocaleString() + " different attribute names.");
           }
         }
@@ -234,8 +244,9 @@
         output.id = feature.id;
       }
       features[index] = output;
+      budget.features = index + 1;
     }
-    if (budget.bytes > LIMITS.propertyBytes) throw new Error("Dataset attribute data exceeds the size budget.");
+    if (budget.bytes > LIMITS.propertyBytes) throw budgetExceeded(budget);
     if (!features.length) throw new Error("Dataset contains no features.");
     return { type: "FeatureCollection", features: features, coordinateCount: counter.count, fields: Array.from(fields),
       estimatedBytes: features.length * 256 + counter.count * 64 + budget.bytes };
