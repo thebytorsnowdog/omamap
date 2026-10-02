@@ -15,7 +15,7 @@ Running `omamap file` again sends the file to the open window. You can also drag
 
 ### Profiles
 
-**Save** (<kbd>Ctrl+S</kbd>) writes a `.omamap` profile: every open dataset with its data, style, visibility and stacking order, plus the map view and basemap. Open it like any other file, from the app, the file manager or `omamap work.omamap`, to pick up where you left off. If datasets are already open, OmaMap asks before replacing them.
+**Save** (<kbd>Ctrl+S</kbd>) writes a `.omamap` profile: every open dataset with its data, style, visibility, stacking order and any warnings shown for it (such as an assumed coordinate system), plus the map view and basemap. Open it like any other file, from the app, the file manager or `omamap work.omamap`, to pick up where you left off. If datasets are already open, OmaMap asks before replacing them.
 
 A profile contains a full copy of the data, so share it with the same care as the data itself. Profiles exported from WIMP (`.sdv-profile.json`) open too.
 
@@ -62,15 +62,15 @@ Fields from every feature are included, even when they first appear late in a da
 ### Formats
 
 - **GeoJSON** (`.geojson`, `.json`) in WGS84 longitude/latitude.
-- **KML** and **GPX**.
+- **KML**, **KMZ** and **GPX**, also inside a ZIP alongside other layers.
 - **CSV** with latitude/longitude columns (`lat`/`lon`, `latitude`/`longitude`), or British National Grid easting/northing (`easting`/`northing`, or `x`/`y` holding grid values). Cells stay as text.
 - **Shapefiles**, either zipped or as loose `.shp` + `.dbf` (+ `.prj`, `.cpg`) files dropped together. A `.prj` file is used to reproject to WGS84. A ZIP with several layers opens as one dataset per layer.
 
 British National Grid data (EPSG:27700) is converted to WGS84 automatically, to within about 5 m (the same 7-parameter method PROJ uses without grid files). That covers easting/northing CSV, GeoJSON that declares EPSG:27700 (as older QGIS exports do), and shapefiles with a BNG `.prj`. The dataset list notes when a conversion happened.
 
-Imports are validated before anything reaches the map. Malformed geometry, unsafe property names, ZIP bombs, inconsistent archives and shapefile headers that don't fit their file are rejected with a reason. Parsing runs in a background worker so large files don't freeze the window (KML and GPX are the exception: they are read on the main thread).
+Imports are validated before anything reaches the map. Malformed geometry, unsafe property names, ZIP bombs, inconsistent archives and shapefile headers that don't fit their file are rejected with a reason. Parsing runs in a background worker so large files don't freeze the window. KML and GPX need the page's XML parser, so they are converted on the main thread in short slices: the window keeps painting and Cancel works, apart from one pause while the XML itself is read.
 
-Limits: 100 MiB per file, 50 MiB per ZIP (250 MiB expanded, at most 50 layers and 1,000,000 features across them), 500,000 features, 5 million coordinates, 1,000 attribute names and 500 attributes per feature per dataset, 10 million values per CSV or shapefile table, 50 datasets.
+Limits: 100 MiB per file, 50 MiB per ZIP (250 MiB expanded, at most 50 layers and 1,000,000 features across them), 500,000 features, 5 million coordinates, 1,000 attribute names and 500 attributes per feature per dataset, 10 million values per CSV or shapefile table, and about 200 MiB of attribute data per dataset (attribute names count once per dataset, so a 200,000 × 20 CSV fits comfortably), 50 datasets.
 
 The whole workspace is also limited to 1 million features, 10 million coordinates, and 512 MiB of estimated data and rendering structures. This estimate is an admission budget, not a limit on the process's actual memory use. The table's search-text cache is limited to 16 MiB per dataset.
 
@@ -158,15 +158,16 @@ tests/     parser tests (Node), browser tests (Playwright), host smoke test
 cmake -S host -B build && cmake --build build
 ./build/omamap --new-window some.geojson     # runs against core/ in this checkout
 
-npm install                 # playwright-core, for the browser tests
-npm test                    # parser, validation, bar widget and vendor-hash tests
+npm install                 # playwright-core and ESLint, for the browser tests and lint
+npm run lint                # ESLint over core/ and tests/ (catches undefined names across the core scripts)
+npm test                    # parser, validation, bar widget, tile-host and vendor-hash tests
 npm run test:browser        # drives core/ in Chromium, incl. hostile-input tests (CHROMIUM=/usr/bin/chromium)
-ctest --test-dir build --output-on-failure # native atomic profile replacement regressions
+ctest --test-dir build --output-on-failure # native profile-save and recent-list tests
 tests/host-smoke.sh         # headless checks of the native host and its hardening (run test:browser first)
 npm run serve               # core/ at http://127.0.0.1:8765 for quick UI work
 ```
 
-`OMAMAP_DEBUG=1` prints page console messages and app-scheme requests. Add `QT_FORCE_STDERR_LOGGING=1` when stderr isn't a terminal. `OMAMAP_CORE_DIR` and `OMAMAP_THEME_DIR` override where the web core and the Omarchy theme are read from. `OMAMAP_INSTANCE=name` uses a separate single-instance channel, so a test run never sends files to your open window.
+`OMAMAP_DEBUG=1` prints page console messages and app-scheme requests. Add `QT_FORCE_STDERR_LOGGING=1` when stderr isn't a terminal. `OMAMAP_CORE_DIR` and `OMAMAP_THEME_DIR` override where the web core and the Omarchy theme are read from. `OMAMAP_INSTANCE=name` uses a separate single-instance channel, so a test run never sends files to your open window. Packages should configure with `-DOMAMAP_DEV_CORE=OFF` so the installed binary never reads `core/` from the build tree.
 
 ### Origins
 

@@ -117,6 +117,7 @@ function applyTheme(theme) {
   STATE.palette = palette.length >= 4 ? palette : FALLBACK_PALETTE.filter(function (c) { return c !== accent; });
   STATE.datasets.forEach(applyDatasetStyle);
   highlightSelection();
+  if (typeof Table !== "undefined" && Table.onThemeChanged) Table.onThemeChanged();
   renderLayerList();
   renderLegend();
   if (STATE.map) setBasemap(STATE.basemapPref, false);
@@ -250,17 +251,9 @@ function geometrySummary(geojson) {
   return Object.keys(set);
 }
 
-// The synchronous wrapper serves small programmatic additions; file imports
-// drive the same generator in short batches so painting and Cancel can run.
-function addDataset(parsed) {
-  const job = prepareDataset(parsed);
-  let step;
-  do { step = job.next(); } while (!step.done);
-  return step.value;
-}
-
-async function addDatasetAsync(parsed) {
-  const job = prepareDataset(parsed);
+// Drive a generator in short slices so painting, input and Cancel can run
+// between them. Cancel stops it at the next slice.
+async function runSliced(job) {
   let started = performance.now();
   while (true) {
     if (cancelledLoad) { job.return(); throw new LoadCancelled("Loading cancelled."); }
@@ -272,10 +265,37 @@ async function addDatasetAsync(parsed) {
   }
 }
 
-function* prepareDataset(parsed) {
-  if (STATE.datasets.length >= MAX_DATASETS) throw new Error("Dataset limit reached (" + MAX_DATASETS + "). Remove one first.");
+// The synchronous wrapper serves small programmatic additions; file imports
+// drive the same generator in short batches so painting and Cancel can run.
+function addDataset(parsed) {
+  const job = prepareDataset(parsed);
+  let step;
+  do { step = job.next(); } while (!step.done);
+  attachDataset(step.value);
+  return step.value;
+}
+
+async function addDatasetAsync(parsed) {
+  const ds = await runSliced(prepareDataset(parsed));
+  attachDataset(ds);
+  return ds;
+}
+
+// Put a prepared dataset on the map and in the dataset list.
+function attachDataset(ds) {
+  if (ds.visible) ds.layer.addTo(STATE.map);
+  STATE.datasets.push(ds);
+}
+
+/* Build a dataset's layers without touching the map or the dataset list, so
+   a cancelled or failed load leaves the workspace as it was. `base` is the
+   set of datasets it will join (the open ones, or a profile being staged);
+   `parsed.style`, `parsed.visible` and `parsed.slot` restore a saved state. */
+function* prepareDataset(parsed, base) {
+  base = base || STATE.datasets;
+  if (base.length >= MAX_DATASETS) throw new Error("Dataset limit reached (" + MAX_DATASETS + "). Remove one first.");
   const geojson = parsed.geojson.estimatedBytes === undefined ? OmaParse.validateFeatureCollection(parsed.geojson) : parsed.geojson;
-  OmaParse.checkWorkspace(STATE.datasets.map(function (ds) { return ds.geojson; }).concat([geojson]));
+  OmaParse.checkWorkspace(base.map(function (ds) { return ds.geojson; }).concat([geojson]));
   const layers = new Array(geojson.features.length), points = [];
   let featureIndex = 0;
   const paths = L.geoJSON(null, {
@@ -305,7 +325,7 @@ function* prepareDataset(parsed) {
   const ds = {
     id: "ds-" + (STATE.nextId++),
     name: String(parsed.name || "Untitled").slice(0, 200),
-    slot: STATE.nextSlot++,
+    slot: Number.isInteger(parsed.slot) && parsed.slot >= 0 ? parsed.slot : STATE.nextSlot++,
     layer: layer,
     features: geojson.features,
     geojson: geojson,
@@ -314,18 +334,26 @@ function* prepareDataset(parsed) {
     layers: layers,           // per feature, in file order
     featureCount: geojson.features.length,
     geomTypes: geometrySummary(geojson),
-    visible: true,
+    visible: parsed.visible !== false,
     warnings: parsed.warnings || []
   };
   ds.style = defaultStyle(ds);
+  if (parsed.style) applySavedStyle(ds, parsed.style);
   const cache = new Map();
   for (let i = 0; i < layers.length; i++) {
     styleFeatureLayer(layers[i], ds, false, cache);
     if (i % 1024 === 0) yield;
   }
-  layer.addTo(STATE.map);
-  STATE.datasets.push(ds);
   return ds;
+}
+
+// A cleaned profile style (see OmaParse.cleanStyle) applied before the first draw.
+function applySavedStyle(ds, st) {
+  ["colour", "fillOpacity", "weight", "radius", "outline"].forEach(function (k) { if (st[k] !== null && st[k] !== undefined) ds.style[k] = st[k]; });
+  if (st.byField && datasetFields(ds).indexOf(st.byField.field) >= 0) {
+    const mode = st.byField.mode === "ranges" && fieldIsNumeric(ds, st.byField.field) ? "ranges" : "categories";
+    setColourBy(ds, st.byField.field, mode, st.byField.reverse);
+  }
 }
 
 function restack() {
@@ -872,16 +900,18 @@ function readBuffer(file) {
 
 async function parseOne(file) {
   const ext = OmaParse.extOf(file.name);
-  const limit = ext === "zip" ? OmaParse.LIMITS.zipBytes : OmaParse.LIMITS.fileBytes;
+  const limit = ext === "zip" || ext === "kmz" ? OmaParse.LIMITS.zipBytes : OmaParse.LIMITS.fileBytes;
   if (typeof file.size === "number" && file.size > limit) throw new Error("File is too large (limit " + Math.round(limit / 1048576) + " MiB).");
   const buffer = await readBuffer(file);
   if (ext === "kml" || ext === "gpx") {
-    // XML formats need DOMParser, which workers lack.
+    // XML formats need DOMParser, which workers lack: convert on the page,
+    // in slices so the window stays responsive and Cancel works.
     if (buffer.byteLength > OmaParse.LIMITS.fileBytes) throw new Error("File is too large.");
     const text = new TextDecoder("utf-8").decode(buffer);
-    return [{ name: OmaParse.baseName(file.name), geojson: OmaParse.xmlToGeoJSON(text, ext) }];
+    return [{ name: OmaParse.baseName(file.name), geojson: await runSliced(OmaParse.xmlToGeoJSONSteps(text, ext)) }];
   }
-  return Parser.run({ kind: "file", name: file.name, buffer: buffer }, [buffer]);
+  // KML / GPX inside a ZIP or KMZ come back as text for the page to convert.
+  return OmaParse.resolveXmlLayers(await Parser.run({ kind: "file", name: file.name, buffer: buffer }, [buffer]), runSliced);
 }
 
 async function parseShapefileSet(stem, group) {
@@ -993,6 +1023,7 @@ function buildProfile() {
         name: ds.name,
         visible: ds.visible,
         slot: ds.slot,
+        warnings: ds.warnings.slice(0, 20),
         style: {
           colour: st.colour, fillOpacity: st.fillOpacity, weight: st.weight, radius: st.radius, outline: st.outline,
           byField: bf ? { field: bf.field, mode: bf.mode, reverse: bf.reverse } : null
@@ -1029,26 +1060,29 @@ async function saveProfile() {
   if (!STATE.host) toast("Profile saved", a.download + " (" + plural(STATE.datasets.length, "dataset") + ")", "ok");
 }
 
+/* Every saved dataset is built off-map first; the open workspace is only
+   replaced once all of them are ready, so Cancel or an error part-way
+   through leaves it exactly as it was. */
 async function restoreProfile(profile) {
+  const staged = [], nextSlot = STATE.nextSlot;
+  try {
+    for (let i = 0; i < profile.datasets.length; i++) {
+      const saved = profile.datasets[i];
+      const ds = await runSliced(prepareDataset({ name: saved.name, geojson: saved.geojson, warnings: saved.warnings,
+        style: saved.style, visible: saved.visible, slot: Number.isInteger(saved.slot) && saved.slot >= 0 ? saved.slot : i }, staged));
+      staged.push(ds);
+    }
+  } catch (error) {
+    staged.forEach(disposeDataset);
+    STATE.nextSlot = nextSlot;
+    throw error;
+  }
   clearSelection();
   STATE.datasets.slice().forEach(disposeDataset);
   STATE.datasets = [];
-  STATE.nextSlot = 0;
   STATE.styleOpenId = null;
-  const added = [];
-  for (const saved of profile.datasets) {
-    const ds = await addDatasetAsync({ name: saved.name, geojson: saved.geojson, warnings: saved.warnings });
-    if (Number.isInteger(saved.slot) && saved.slot >= 0) ds.slot = saved.slot;
-    const st = saved.style || {};
-    ["colour", "fillOpacity", "weight", "radius", "outline"].forEach(function (k) { if (st[k] !== null && st[k] !== undefined) ds.style[k] = st[k]; });
-    if (st.byField && datasetFields(ds).indexOf(st.byField.field) >= 0) {
-      const mode = st.byField.mode === "ranges" && fieldIsNumeric(ds, st.byField.field) ? "ranges" : "categories";
-      setColourBy(ds, st.byField.field, mode, st.byField.reverse);
-    }
-    applyDatasetStyle(ds);
-    if (saved.visible === false) { ds.visible = false; STATE.map.removeLayer(ds.layer); }
-    added.push(ds);
-  }
+  staged.forEach(attachDataset);
+  const added = staged;
   STATE.nextSlot = STATE.datasets.reduce(function (m, d) { return Math.max(m, d.slot + 1); }, 0);
   if (profile.basemap && (profile.basemap === "auto" || OMAMAP_BASEMAPS.some(function (b) { return b.id === profile.basemap; }))) setBasemap(profile.basemap, true);
   if (profile.view) STATE.map.setView([profile.view.lat, profile.view.lng], profile.view.zoom);
@@ -1147,7 +1181,7 @@ function initMap() {
   STATE.map.getPane("labels").style.zIndex = 450;          // above overlays (400), below markers' tooltips
   STATE.map.getPane("labels").style.pointerEvents = "none";
   L.control.scale({ position: "bottomleft", maxWidth: 140 }).addTo(STATE.map);
-  let view = null;
+  let view;
   try { view = JSON.parse(storageGet(STORAGE_KEYS.view) || "null"); } catch (e) { view = null; }
   if (view && Number.isFinite(view.lat) && Number.isFinite(view.lng) && Number.isFinite(view.zoom)) STATE.map.setView([view.lat, view.lng], view.zoom);
   else STATE.map.setView([30, 0], 3);

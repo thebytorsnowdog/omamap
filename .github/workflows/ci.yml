@@ -15,7 +15,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     container:
-      image: archlinux:base-devel
+      # Pinned by digest (archlinux:base-devel as of 2026-09-28) so the base
+      # image cannot change under a run. pacman -Syu still installs current
+      # Arch packages: Arch does not support partial upgrades, so bump this
+      # digest deliberately rather than freezing packages.
+      image: archlinux:base-devel@sha256:51dd3d24f7fba779e7c471caeee7804c50e8c134ad948e19685a1c83a42facc3
       options: --shm-size=1g
     env:
       # The disposable container runs as root. This is only for CI; the
@@ -30,6 +34,7 @@ jobs:
       - name: Trust the checked-out workspace in this disposable container
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - run: npm ci --ignore-scripts
+      - run: npm run lint
       - run: npm test
       - run: npm run test:browser
       - run: cmake -S host -B build -DCMAKE_BUILD_TYPE=Release

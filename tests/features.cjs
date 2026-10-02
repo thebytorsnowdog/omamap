@@ -94,6 +94,23 @@ function fixtures(dir) {
     assert.equal(s.weight, 4);
   });
 
+  await check("a fast slider drag coalesces restyles and ends on the last value", async () => {
+    const r = await page.evaluate(async () => {
+      const ds = STATE.datasets.find((d) => d.name === "sites");
+      const real = window.applyDatasetStyle;
+      let calls = 0;
+      window.applyDatasetStyle = function (d) { calls++; return real(d); };
+      try {
+        const slider = Array.from(document.querySelectorAll(".style-editor input[type=range]")).find((x) => x.max === "8");
+        for (let i = 0; i < 12; i++) { slider.value = String(1 + i * 0.5); slider.dispatchEvent(new Event("input")); }
+        await restyleIdle();
+      } finally { window.applyDatasetStyle = real; }
+      return { calls, weight: ds.layers[0].options.weight };
+    });
+    assert.ok(r.calls >= 1 && r.calls <= 2, "restyles: " + r.calls);
+    assert.equal(r.weight, 6.5);
+  });
+
   await check("outline option uses the theme's text colour", async () => {
     await page.locator(".style-editor .st-row", { hasText: "Outline" }).locator("select").selectOption("fg");
     await settle();
@@ -267,7 +284,7 @@ function fixtures(dir) {
     assert.equal(await page.locator("#table-panel").isHidden(), true);
   });
 
-  await check("a saved profile reopens with data, styles, visibility, view and basemap", async () => {
+  await check("a saved profile reopens with data, styles, visibility, warnings, view and basemap", async () => {
     await page.evaluate(() => clearAll());
     await page.setInputFiles("#file-input", [path.join(OUT, "fixtures-features", "assets.geojson"), path.join(OUT, "fixtures-features", "sites.geojson")]);
     await page.waitForFunction(() => STATE.datasets.length === 2 && document.getElementById("loading").hidden);
@@ -278,6 +295,7 @@ function fixtures(dir) {
       sites.style.colour = "#123456"; sites.style.outline = "fg"; sites.style.fillOpacity = 0.6;
       applyDatasetStyle(sites);
       toggleVisible(sites.id);
+      sites.warnings = ["No .prj file: coordinates were assumed to be WGS84."];
       setBasemap("topo", true);
       return { order: STATE.datasets.map((d) => d.name), colours: assets.layers.slice(0, 5).map((l) => l.options.fillColor) };
     });
@@ -297,6 +315,7 @@ function fixtures(dir) {
         order: STATE.datasets.map((d) => d.name), colours: assets.layers.slice(0, 5).map((l) => l.options.fillColor),
         byField: { field: assets.style.byField.field, mode: assets.style.byField.mode, reverse: assets.style.byField.reverse },
         sites: { visible: sites.visible, colour: sites.style.colour, outline: sites.style.outline, fillOpacity: sites.style.fillOpacity },
+        warnings: sites.warnings, warnRows: Array.from(document.querySelectorAll(".layer-warn")).map((w) => w.textContent),
         view: [Math.round(c.lat * 100) / 100, Math.round(c.lng * 100) / 100, STATE.map.getZoom()], basemap: STATE.basemapId
       };
     });
@@ -304,6 +323,8 @@ function fixtures(dir) {
     assert.deepEqual(after.colours, before.colours);
     assert.deepEqual(after.byField, { field: "condition_grade", mode: "categories", reverse: true });
     assert.deepEqual(after.sites, { visible: false, colour: "#123456", outline: "fg", fillOpacity: 0.6 });
+    assert.deepEqual(after.warnings, ["No .prj file: coordinates were assumed to be WGS84."]);
+    assert.deepEqual(after.warnRows, ["⚠ No .prj file: coordinates were assumed to be WGS84."]);
     assert.deepEqual(after.view, [55.95, -3.9, 12]);
     assert.equal(after.basemap, "topo");
   });
@@ -371,6 +392,106 @@ function fixtures(dir) {
     assert.match(await page.locator(".toast.warn").first().textContent(), /cancelled/i);
     await page.evaluate((f) => handleFiles([f]), next);
     assert.deepEqual(await page.evaluate(() => STATE.datasets.map((d) => d.name)), ["next"]);
+  });
+
+  await check("cancelling a profile restore leaves the open workspace untouched", async () => {
+    const r = await page.evaluate(async () => {
+      clearAll();
+      const pts = (n, x) => ({ type: "FeatureCollection", features: Array.from({ length: n }, (_, i) => ({ type: "Feature", geometry: { type: "Point", coordinates: [x + (i % 300) * 0.001, 55 + Math.floor(i / 300) * 0.001] }, properties: { id: i } })) });
+      addDataset({ name: "keep A", geojson: pts(10, -4) });
+      addDataset({ name: "keep B", geojson: pts(10, -3) });
+      STATE.map.stop(); STATE.map.setView([55, -3.5], 8, { animate: false });
+      const before = STATE.map.getCenter();
+      const profile = { omamap: "profile", version: 1, view: { lat: 10, lng: 10, zoom: 5 }, basemap: "none",
+        datasets: [{ name: "p1", geojson: pts(60000, 1) }, { name: "p2", geojson: pts(60000, 2) }, { name: "p3", geojson: pts(60000, 3) }] };
+      const parsed = await OmaParse.parseBytes("w.omamap", new TextEncoder().encode(JSON.stringify(profile)).buffer);
+      cancelledLoad = false;
+      const restoring = restoreProfile(parsed);
+      setTimeout(() => { cancelledLoad = true; }, 30);
+      let error = null;
+      try { await restoring; } catch (e) { error = e instanceof LoadCancelled ? "cancelled" : e.message; }
+      cancelledLoad = false;
+      const kept = STATE.datasets.map((d) => d.name);
+      const onMap = STATE.datasets.every((d) => STATE.map.hasLayer(d.layer));
+      const pointLayers = Object.values(STATE.map._layers).filter((l) => l instanceof FastPoints).length;
+      const after = STATE.map.getCenter();
+      // A complete restore still works afterwards.
+      await restoreProfile(parsed);
+      return { error, kept, onMap, pointLayers, moved: before.distanceTo(after) > 1, restored: STATE.datasets.map((d) => d.name) };
+    });
+    assert.equal(r.error, "cancelled");
+    assert.deepEqual(r.kept, ["keep A", "keep B"]);
+    assert.equal(r.onMap, true);
+    assert.equal(r.pointLayers, 2, "no half-restored layers remain on the map");
+    assert.equal(r.moved, false, "the saved view was not applied");
+    assert.deepEqual(r.restored, ["p1", "p2", "p3"]);
+  });
+
+  await check("KML and GPX inside a ZIP, and KMZ files, open as datasets", async () => {
+    const fflate = require(path.join(CORE, "vendor/fflate.js"));
+    const kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><name>Pier</name><Point><coordinates>-3.2,55.9</coordinates></Point></Placemark><Placemark><LineString><coordinates>-3.2,55.9 -3.1,55.95</coordinates></LineString></Placemark></kml>';
+    const gpx = '<?xml version="1.0"?><gpx version="1.1" creator="t"><wpt lat="55.9" lon="-3.3"><name>Start</name></wpt></gpx>';
+    const dir = path.join(OUT, "fixtures-xml-zip"); fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "bundle.zip"), fflate.zipSync({ "doc.kml": fflate.strToU8(kml), "walk.gpx": fflate.strToU8(gpx) }));
+    fs.writeFileSync(path.join(dir, "trip.kmz"), fflate.zipSync({ "doc.kml": fflate.strToU8(kml), "files/icon.png": new Uint8Array([1, 2, 3]) }));
+    await page.evaluate(() => { clearAll(); document.querySelectorAll(".toast").forEach((t) => t.remove()); });
+    await page.setInputFiles("#file-input", [path.join(dir, "bundle.zip"), path.join(dir, "trip.kmz")]);
+    await page.waitForFunction(() => STATE.datasets.length === 3 && document.getElementById("loading").hidden);
+    const r = await page.evaluate(() => ({ sets: STATE.datasets.map((d) => d.name + ":" + d.featureCount).sort(), errors: document.querySelectorAll(".toast.err").length }));
+    assert.deepEqual(r.sets, ["bundle / doc:2", "bundle / walk:1", "trip:2"]);
+    assert.equal(r.errors, 0);
+  });
+
+  await check("a large KML converts in slices and Cancel stops it", async () => {
+    await page.evaluate(() => { clearAll(); document.querySelectorAll(".toast").forEach((t) => t.remove()); });
+    const r = await page.evaluate(async () => {
+      let kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>';
+      for (let i = 0; i < 40000; i++) kml += "<Placemark><name>P" + i + "</name><Point><coordinates>" + (-4 + (i % 200) * 0.01) + "," + (55 + Math.floor(i / 200) * 0.005) + "</coordinates></Point></Placemark>";
+      kml += "</Document></kml>";
+      let frames = 0, counting = true;
+      const tick = () => { frames++; if (counting) requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+      const loading = handleFiles([new File([kml], "big.kml")]);
+      await new Promise((res) => setTimeout(res, 150));
+      cancelledLoad = true;
+      await loading;
+      counting = false;
+      return { frames, datasets: STATE.datasets.length, warn: Array.from(document.querySelectorAll(".toast.warn")).map((t) => t.textContent).join(" ") };
+    });
+    assert.equal(r.datasets, 0);
+    assert.match(r.warn, /cancelled/i);
+    assert.ok(r.frames >= 2, "the page kept painting while the KML converted (" + r.frames + " frames)");
+  });
+
+  await check("a wide table draws only the rows and columns in view, and keeps rows while scrolling", async () => {
+    const r = await page.evaluate(async () => {
+      clearAll();
+      const features = Array.from({ length: 3000 }, (_, i) => { const p = {}; for (let c = 0; c < 300; c++) p["c" + c] = i + "/" + c; return { type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: p }; });
+      const ds = addDataset({ name: "wide", geojson: { type: "FeatureCollection", features } });
+      Table.open(ds); await Table.pending; Table.draw();
+      const scroll = document.getElementById("tp-scroll"), body = document.getElementById("tp-body");
+      const cellsPerRow = body.firstElementChild.children.length;
+      const keep = body.children[15];
+      scroll.scrollTop += 26 * 3; Table.draw();
+      const kept = keep.isConnected;
+      const tops = Array.from(body.children).map((row) => parseInt(row.style.top, 10));
+      const ordered = tops.every((t, i) => !i || t > tops[i - 1]);
+      // Scroll right to column 250 and read the cell under its header.
+      const head = document.getElementById("tp-header").children[251];
+      scroll.scrollLeft = head.offsetLeft; Table.draw();
+      const row = body.querySelector(".tp-row");
+      const cell = row.children[1 + 250 - Table.drawn.c0];
+      const cellBox = cell.getBoundingClientRect(), headBox = head.getBoundingClientRect();
+      const width = body.offsetWidth >= document.getElementById("tp-header").scrollWidth - 1;
+      Table.close(); removeDataset(ds.id);
+      return { cellsPerRow, kept, ordered, text: cell.textContent, index: row.dataset.index, aligned: Math.abs(cellBox.left - headBox.left) < 1, width };
+    });
+    assert.ok(r.cellsPerRow < 60, "only visible columns are drawn (" + r.cellsPerRow + ")");
+    assert.equal(r.kept, true, "rows still in view are reused");
+    assert.equal(r.ordered, true, "document order follows the rows on screen");
+    assert.equal(r.text, r.index + "/250");
+    assert.equal(r.aligned, true, "cells line up with their header");
+    assert.equal(r.width, true);
   });
 
   // Draw a row of points with each renderer and check the pixels land where

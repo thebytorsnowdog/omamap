@@ -7,7 +7,7 @@
 
 // Serves the web core at omamap://app/... and, at omamap://app/file/<token>/<name>,
 // only the local files the user explicitly opened (command line, file manager).
-// Tokens are random (128 bits), file responses are only served to the app's
+// Tokens are random (128 bits) and single use, file responses are only served to the app's
 // own page, and every response carries the page's CSP and nosniff.
 class SchemeHandler : public QWebEngineUrlSchemeHandler
 {
@@ -24,7 +24,10 @@ public:
     static void registerScheme();   // must run before QApplication exists
 
     // Returns the URL the page can fetch the file from.
+    // The URL works once: the first successful read revokes it.
     QString shareFile(const QString &absolutePath);
+    // Forget every unread file URL (the page that was handed them is gone).
+    void revokeAll();
     QString coreDir() const { return m_coreDir; }
 
     void requestStarted(QWebEngineUrlRequestJob *job) override;

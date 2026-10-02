@@ -154,9 +154,15 @@
      strings and nesting, and no prototype-pollution key anywhere. Returns the
      value to store (only Dates are replaced). Not copying keeps peak memory
      close to the parsed size, which matters for large files. */
+  function budgetExceeded(budget) {
+    return new Error("Dataset attribute data exceeds the " + Math.round(LIMITS.propertyBytes / 1048576) + " MiB attribute budget" +
+      (budget.features ? " after " + budget.features.toLocaleString() + " features" : "") +
+      ". Remove unused columns or split the file.");
+  }
+
   function checkJsonValue(value, depth, budget) {
     budget.bytes += 16;
-    if (budget.bytes > LIMITS.propertyBytes) throw new Error("Dataset attribute data exceeds the size budget.");
+    if (budget.bytes > LIMITS.propertyBytes) throw budgetExceeded(budget);
     if (depth > 20) throw new Error("Nested property depth exceeds 20.");
     if (value === null || typeof value === "boolean") return value;
     if (typeof value === "number") {
@@ -178,7 +184,10 @@
       if (keys.length > LIMITS.propertiesPerFeature) throw new Error("An object has too many properties.");
       for (let i = 0; i < keys.length; i++) {
         const key = keys[i];
-        budget.bytes += key.length * 2 + 16;
+        // A feature's top-level attribute names repeat on every feature and
+        // share one string, so they are charged once per dataset (see
+        // validateFeatureCollection); each feature pays only for the slot.
+        budget.bytes += depth === 0 ? 8 : key.length * 2 + 16;
         if (FORBIDDEN_PROPERTY_NAMES.indexOf(key) >= 0) throw new Error("Rejected unsafe property name: " + key);
         if (key.length > LIMITS.propertyString) throw new Error("A property name is too long.");
         const v = value[key];
@@ -204,7 +213,7 @@
     const fc = normalizeToFeatureCollection(input);
     if (fc.features.length > LIMITS.features) throw new Error("Dataset exceeds the " + LIMITS.features.toLocaleString() + " feature limit.");
     const counter = { count: 0 };
-    const budget = { bytes: 0 };
+    const budget = { bytes: 0, features: 0 };
     // Every distinct attribute name becomes a table column and a "colour by"
     // choice, so a dataset may not invent an unbounded number of them.
     const fields = new Set();
@@ -219,6 +228,7 @@
         for (const key in props) {
           if (!fields.has(key)) {
             fields.add(key);
+            budget.bytes += key.length * 2 + 16;
             if (fields.size > LIMITS.fieldsPerDataset) throw new Error("Dataset has more than " + LIMITS.fieldsPerDataset.toLocaleString() + " different attribute names.");
           }
         }
@@ -234,8 +244,9 @@
         output.id = feature.id;
       }
       features[index] = output;
+      budget.features = index + 1;
     }
-    if (budget.bytes > LIMITS.propertyBytes) throw new Error("Dataset attribute data exceeds the size budget.");
+    if (budget.bytes > LIMITS.propertyBytes) throw budgetExceeded(budget);
     if (!features.length) throw new Error("Dataset contains no features.");
     return { type: "FeatureCollection", features: features, coordinateCount: counter.count, fields: Array.from(fields),
       estimatedBytes: features.length * 256 + counter.count * 64 + budget.bytes };
@@ -422,7 +433,7 @@
     if ((parsed.data.length - 1) * fields.length > LIMITS.cells) throw new Error("CSV has more than " + LIMITS.cells.toLocaleString() + " cells (rows × columns).");
     const headerKeys = new Set();
     fields.forEach(function (field, index) {
-      const key = String(field).replace(/^﻿/, "").trim();
+      const key = String(field).replace(/^\uFEFF/, "").trim();
       if (!key || headerKeys.has(key)) throw new Error("CSV headers must be non-empty and unique.");
       if (FORBIDDEN_PROPERTY_NAMES.indexOf(key) !== -1) throw new Error("Rejected unsafe CSV header: " + key);
       fields[index] = key;
@@ -487,20 +498,43 @@
     return n;
   }
 
-  function xmlToGeoJSON(text, ext) {
+  /* Cheap checks that need no DOM, so they also run in the worker for KML
+     and GPX found inside a ZIP. Returns the number of feature elements. */
+  function precheckXml(text, ext) {
     if (/<!DOCTYPE|<!ENTITY/i.test(String(text))) throw new Error("XML with a DOCTYPE or ENTITY declaration is not accepted.");
-    // This runs on the main thread and can't be cancelled, so refuse files
-    // with too many features before building a DOM for them (a 100 MiB KML
-    // of placemarks froze the window for about a minute, only to be refused).
+    // Refuse files with too many features before building a DOM for them (a
+    // 100 MiB KML of placemarks froze the window for about a minute, only to
+    // be refused).
     const items = ext === "kml" ? countMatches(text, /<(?:\w+:)?Placemark[\s>]/g) : countMatches(text, /<(?:\w+:)?(?:wpt|trk|rte)[\s>]/g);
     if (items > LIMITS.features) throw new Error("File has more than " + LIMITS.features.toLocaleString() + (ext === "kml" ? " placemarks." : " waypoints, tracks and routes."));
+    return items;
+  }
+
+  /* KML / GPX to a validated FeatureCollection, as a generator that yields
+     between features: the caller can spread the conversion over several
+     frames and stop it (Cancel). Only DOMParser itself runs in one piece. */
+  function* xmlToGeoJSONSteps(text, ext) {
+    precheckXml(text, ext);
     const doc = new root.DOMParser().parseFromString(text, "text/xml");
     if (doc.getElementsByTagName("parsererror").length) throw new Error("File is not valid " + ext.toUpperCase() + " XML.");
-    const geojson = ext === "kml" ? root.toGeoJSON.kml(doc) : root.toGeoJSON.gpx(doc);
-    // toGeoJSON emits null-geometry features for empty placemarks; skip them
-    // rather than rejecting the whole file.
-    geojson.features = (geojson.features || []).filter(function (f) { return f && f.geometry; });
-    return validateFeatureCollection(geojson);
+    yield;
+    const features = [];
+    let n = 0;
+    for (const f of ext === "kml" ? root.toGeoJSON.kmlGen(doc) : root.toGeoJSON.gpxGen(doc)) {
+      // toGeoJSON emits null-geometry features for empty placemarks; skip
+      // them rather than rejecting the whole file.
+      if (f && f.geometry) features.push(f);
+      if (++n % 128 === 0) yield;
+    }
+    yield;
+    return validateFeatureCollection({ type: "FeatureCollection", features: features });
+  }
+
+  function xmlToGeoJSON(text, ext) {
+    const job = xmlToGeoJSONSteps(text, ext);
+    let step;
+    do { step = job.next(); } while (!step.done);
+    return step.value;
   }
 
   /* ------------------------------- ZIP ----------------------------------- */
@@ -713,14 +747,14 @@
     try { entries = extractZip(arrayBuffer); }
     catch (error) { throw new Error("Could not read ZIP: " + safeMessage(error, "invalid or unsupported archive.")); }
     const layers = [];
-    const layerCount = Array.from(entries.keys()).filter(function (n) { return /\.(shp|json|geojson|csv)$/.test(n); }).length;
+    const layerCount = Array.from(entries.keys()).filter(function (n) { return /\.(shp|json|geojson|csv|kml|gpx)$/.test(n); }).length;
     if (layerCount > LIMITS.layersPerFile) throw new Error("ZIP contains more than " + LIMITS.layersPerFile + " layers.");
     const multiple = layerCount > 1;
     // Each layer is capped on its own; this caps them together, so many
     // small layers cannot add up to more than memory can hold.
     let total = 0;
     const counted = function (layer) {
-      total += layer.geojson.features.length;
+      total += layer.geojson ? layer.geojson.features.length : layer.xml.items;
       if (total > LIMITS.featuresPerFile) throw new Error("ZIP layers together exceed " + LIMITS.featuresPerFile.toLocaleString() + " features.");
       layers.push(layer);
     };
@@ -734,9 +768,15 @@
         counted(withNotes(label, jsonToGeoJSON(decodeText(bytes))));
       } else if (filename.endsWith(".csv")) {
         counted(withNotes(label, csvToGeoJSON(decodeText(bytes))));
+      } else if (/\.(kml|gpx)$/.test(filename)) {
+        // XML needs DOMParser, which workers lack: check what can be checked
+        // here and hand the text back for the page to convert (resolveXmlLayers).
+        if (bytes.length > LIMITS.fileBytes) throw new Error(filename + " is too large (limit " + Math.round(LIMITS.fileBytes / 1048576) + " MiB).");
+        const ext = filename.slice(-3), text = decodeText(bytes);
+        counted({ name: label, xml: { ext: ext, text: text, items: precheckXml(text, ext) }, warnings: [] });
       }
     }
-    if (!layers.length) throw new Error("ZIP contains no shapefile, GeoJSON or CSV layers.");
+    if (!layers.length) throw new Error("ZIP contains no shapefile, GeoJSON, CSV, KML or GPX layers.");
     return layers;
   }
 
@@ -765,6 +805,13 @@
   function cleanHex(v) { return typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : null; }
   function cleanNum(v, lo, hi, fallback) { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback; }
   function cleanText(v, max) { return typeof v === "string" ? v.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, max) : ""; }
+
+  // Notes saved with a dataset (assumed CRS, skipped rows): shown as text only.
+  function cleanWarnings(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(function (w) { return typeof w === "string"; }).slice(0, 20)
+      .map(function (w) { return cleanText(w, 300).trim(); }).filter(Boolean);
+  }
 
   function cleanStyle(raw) {
     const st = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
@@ -811,7 +858,7 @@
       catch (e) { throw new Error("Profile dataset “" + name + "”: " + safeMessage(e)); }
       datasets.push({ name: name, geojson: geojson, visible: ds.visible !== false,
         slot: Number.isSafeInteger(ds.slot) && ds.slot >= 0 && ds.slot <= 1000000 ? ds.slot : i,
-        style: wimp ? wimpStyle(ds) : cleanStyle(ds.style), warnings: [] });
+        style: wimp ? wimpStyle(ds) : cleanStyle(ds.style), warnings: cleanWarnings(ds.warnings) });
       checkWorkspace(datasets.map(function (item) { return item.geojson; }));
     });
     let view = null;
@@ -881,7 +928,7 @@
   async function parseBytes(name, buffer) {
     const ext = extOf(name);
     const display = baseName(name) || "Untitled";
-    if (ext === "zip") return zipToDatasets(buffer, name);
+    if (ext === "zip" || ext === "kmz") return zipToDatasets(buffer, name);
     if (buffer.byteLength > LIMITS.fileBytes) throw new Error("File is too large (limit " + Math.round(LIMITS.fileBytes / 1048576) + " MiB).");
     const text = decodeText(new Uint8Array(buffer));
     if (ext === "csv" || ext === "tsv" || ext === "txt") return [withNotes(display, csvToGeoJSON(text))];
@@ -895,6 +942,22 @@
     // Unknown extension: try JSON, then CSV.
     try { return [withNotes(display, jsonToGeoJSON(text))]; }
     catch (e) { return [withNotes(display, csvToGeoJSON(text))]; }
+  }
+
+  /* On the page: convert KML / GPX layers that came back from a ZIP, then
+     re-check the per-file feature total with the exact counts. `run` drives
+     a generator (time-sliced and cancellable in the app). */
+  async function resolveXmlLayers(datasets, run) {
+    if (!Array.isArray(datasets)) return datasets;
+    run = run || function (job) { let step; do { step = job.next(); } while (!step.done); return step.value; };
+    for (const d of datasets) {
+      if (!d.xml) continue;
+      d.geojson = await run(xmlToGeoJSONSteps(d.xml.text, d.xml.ext));
+      delete d.xml;
+    }
+    const total = datasets.reduce(function (sum, d) { return sum + d.geojson.features.length; }, 0);
+    if (total > LIMITS.featuresPerFile) throw new Error("ZIP layers together exceed " + LIMITS.featuresPerFile.toLocaleString() + " features.");
+    return datasets;
   }
 
   async function parseShapefileSet(name, parts) {
@@ -919,6 +982,8 @@
     jsonToGeoJSON: jsonToGeoJSON,
     csvToGeoJSON: csvToGeoJSON,
     xmlToGeoJSON: xmlToGeoJSON,
+    xmlToGeoJSONSteps: xmlToGeoJSONSteps,
+    resolveXmlLayers: resolveXmlLayers,
     inspectZipMetadata: inspectZipMetadata,
     bngToWgs84: bngToWgs84,
     PROFILE_VERSION: PROFILE_VERSION,
