@@ -117,6 +117,7 @@ function applyTheme(theme) {
   STATE.palette = palette.length >= 4 ? palette : FALLBACK_PALETTE.filter(function (c) { return c !== accent; });
   STATE.datasets.forEach(applyDatasetStyle);
   highlightSelection();
+  if (typeof Table !== "undefined" && Table.onThemeChanged) Table.onThemeChanged();
   renderLayerList();
   renderLegend();
   if (STATE.map) setBasemap(STATE.basemapPref, false);

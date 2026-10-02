@@ -19,6 +19,9 @@ const Table = {
   selected: -1,       // feature index
   frame: 0,
   revision: 0,
+  rows: new Map(),    // drawn row elements by position in `order`
+  drawn: null,        // { order, c0, c1 } the drawn rows were built for
+  colEdges: null,     // header cell [left, right] in px, measured lazily
   pending: Promise.resolve(),
 
   isOpen: function () { return !el("table-panel").hidden; },
@@ -38,9 +41,16 @@ const Table = {
     this.ds = null;
     this.order = null;
     this.columns = [];
-    el("tp-body").textContent = "";
+    this.resetRows();
     el("tp-header").textContent = "";
     renderLayerList();
+  },
+
+  // Forget drawn rows; the next draw builds them again.
+  resetRows: function () {
+    this.rows = new Map();
+    this.drawn = null;
+    el("tp-body").textContent = "";
   },
 
   forget: function (ds) {
@@ -49,7 +59,7 @@ const Table = {
       this.revision++;
       cancelAnimationFrame(this.frame);
       this.ds = null; this.order = null; this.columns = [];
-      el("tp-body").textContent = "";
+      this.resetRows();
       el("tp-header").textContent = "";
     }
     ds.rowText = null; ds.rowTextBytes = 0;
@@ -113,7 +123,13 @@ const Table = {
   renderHeader: function () {
     const head = el("tp-header");
     head.textContent = "";
-    head.style.gridTemplateColumns = this.gridTemplate();
+    const template = this.gridTemplate();
+    head.style.gridTemplateColumns = template;
+    // Rows share the template through a custom property instead of each
+    // carrying a copy of a string that can list a thousand columns.
+    el("tp-body").style.setProperty("--tp-cols", template);
+    this.colEdges = null;
+    this.resetRows();
     const make = (label, field) => {
       const b = document.createElement("button");
       b.type = "button"; b.className = "tp-hcell";
@@ -240,6 +256,52 @@ const Table = {
     this.frame = requestAnimationFrame(() => this.draw());
   },
 
+  // Header cell edges in px, read once per header (one layout).
+  measureEdges: function () {
+    const cells = el("tp-header").children, edges = new Array(Math.max(0, cells.length - 1));
+    for (let k = 1; k < cells.length; k++) edges[k - 1] = [cells[k].offsetLeft, cells[k].offsetLeft + cells[k].offsetWidth];
+    this.colEdges = edges;
+  },
+
+  // Columns overlapping the horizontal viewport, with one either side.
+  visibleColumns: function (left, width) {
+    if (!this.colEdges || this.colEdges.length !== this.columns.length) this.measureEdges();
+    const e = this.colEdges, n = e.length;
+    if (!n) return [0, -1];
+    if (!e[n - 1][1]) return [0, n - 1];   // not laid out (hidden): draw every column
+    let lo = 0, hi = n - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (e[mid][1] <= left) lo = mid + 1; else hi = mid; }
+    let c1 = lo;
+    while (c1 < n - 1 && e[c1 + 1][0] < left + width) c1++;
+    return [Math.max(0, lo - 1), Math.min(n - 1, c1 + 1)];
+  },
+
+  makeRow: function (pos, c0, c1) {
+    const i = this.order[pos];
+    const p = this.ds.features[i].properties;
+    const row = document.createElement("div");
+    row.className = "tp-row" + (i === this.selected ? " selected" : "") + (pos % 2 ? " odd" : "");
+    row.style.top = (pos * ROW_HEIGHT) + "px";
+    row.dataset.index = i;
+    const num = document.createElement("span"); num.className = "tp-cell tp-num"; num.textContent = String(i + 1);
+    row.appendChild(num);
+    for (let k = c0; k <= c1; k++) {
+      const v = propOf(p, this.columns[k].field);
+      const cell = document.createElement("span");
+      cell.className = v === null || v === undefined ? "tp-cell nullish" : "tp-cell";
+      // Off-screen columns to the left are not drawn: place the first one.
+      if (k === c0 && c0 > 0) cell.style.gridColumn = String(k + 2);
+      const text = v === null ? "null" : v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+      cell.textContent = text;
+      cell.title = text;
+      row.appendChild(cell);
+    }
+    return row;
+  },
+
+  /* Only rows and columns in view are drawn. Scrolling keeps the rows that
+     stay in view and adds or removes the ones at the edges; the full set is
+     rebuilt only when the row order or the visible columns change. */
   draw: function () {
     const ds = this.ds;
     if (!ds || !this.order) return;
@@ -248,31 +310,38 @@ const Table = {
     const top = Math.max(0, scroll.scrollTop - el("tp-header").offsetHeight);
     const first = Math.max(0, Math.floor(top / ROW_HEIGHT) - 10);
     const last = Math.min(this.order.length, first + Math.ceil(scroll.clientHeight / ROW_HEIGHT) + 20);
-    const template = this.gridTemplate();
-    const frag = document.createDocumentFragment();
-    for (let pos = first; pos < last; pos++) {
-      const i = this.order[pos];
-      const p = ds.features[i].properties;
-      const row = document.createElement("div");
-      row.className = "tp-row" + (i === this.selected ? " selected" : "") + (pos % 2 ? " odd" : "");
-      row.style.top = (pos * ROW_HEIGHT) + "px";
-      row.style.gridTemplateColumns = template;
-      row.dataset.index = i;
-      const num = document.createElement("span"); num.className = "tp-cell tp-num"; num.textContent = String(i + 1);
-      row.appendChild(num);
-      this.columns.forEach(function (c) {
-        const v = propOf(p, c.field);
-        const cell = document.createElement("span");
-        cell.className = "tp-cell";
-        if (v === null || v === undefined) { cell.classList.add("nullish"); cell.textContent = v === null ? "null" : ""; }
-        else cell.textContent = typeof v === "object" ? JSON.stringify(v) : String(v);
-        cell.title = cell.textContent;
-        row.appendChild(cell);
-      });
-      frag.appendChild(row);
+    const cols = this.visibleColumns(scroll.scrollLeft, scroll.clientWidth);
+    const c0 = cols[0], c1 = cols[1];
+    const d = this.drawn;
+    if (!d || d.order !== this.order || d.c0 !== c0 || d.c1 !== c1) {
+      this.rows = new Map();
+      body.textContent = "";
+      this.drawn = { order: this.order, c0: c0, c1: c1 };
     }
-    body.textContent = "";
-    body.appendChild(frag);
+    let lowest = Infinity;
+    for (const [pos, row] of this.rows) {
+      if (pos < first || pos >= last) { row.remove(); this.rows.delete(pos); }
+      else {
+        if (pos < lowest) lowest = pos;
+        row.classList.toggle("selected", Number(row.dataset.index) === this.selected);
+      }
+    }
+    const before = document.createDocumentFragment(), after = document.createDocumentFragment();
+    for (let pos = first; pos < last; pos++) {
+      if (this.rows.has(pos)) continue;
+      const row = this.makeRow(pos, c0, c1);
+      this.rows.set(pos, row);
+      (pos < lowest ? before : after).appendChild(row);
+    }
+    // Keep document order = visual order.
+    if (before.firstChild) body.insertBefore(before, body.firstChild);
+    if (after.firstChild) body.appendChild(after);
+  },
+
+  // Column widths are in ch, so a font change moves the edges.
+  onThemeChanged: function () {
+    this.colEdges = null;
+    if (this.isOpen()) { this.resetRows(); this.render(); }
   },
 
   // Select the feature for a row and show it on the map.
@@ -358,7 +427,7 @@ const Table = {
       else if (e.key === "PageUp") { e.preventDefault(); this.step(-page); }
       else if (e.key === "Enter") { e.preventDefault(); zoomToSelection(); }
     });
-    new ResizeObserver(() => this.render()).observe(el("tp-scroll"));
+    new ResizeObserver(() => { this.colEdges = null; this.render(); }).observe(el("tp-scroll"));
 
     // Drag the top edge to resize.
     const handle = el("tp-resize");

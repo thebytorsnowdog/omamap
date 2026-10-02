@@ -442,6 +442,37 @@ function fixtures(dir) {
     assert.ok(r.frames >= 2, "the page kept painting while the KML converted (" + r.frames + " frames)");
   });
 
+  await check("a wide table draws only the rows and columns in view, and keeps rows while scrolling", async () => {
+    const r = await page.evaluate(async () => {
+      clearAll();
+      const features = Array.from({ length: 3000 }, (_, i) => { const p = {}; for (let c = 0; c < 300; c++) p["c" + c] = i + "/" + c; return { type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: p }; });
+      const ds = addDataset({ name: "wide", geojson: { type: "FeatureCollection", features } });
+      Table.open(ds); await Table.pending; Table.draw();
+      const scroll = document.getElementById("tp-scroll"), body = document.getElementById("tp-body");
+      const cellsPerRow = body.firstElementChild.children.length;
+      const keep = body.children[15];
+      scroll.scrollTop += 26 * 3; Table.draw();
+      const kept = keep.isConnected;
+      const tops = Array.from(body.children).map((row) => parseInt(row.style.top, 10));
+      const ordered = tops.every((t, i) => !i || t > tops[i - 1]);
+      // Scroll right to column 250 and read the cell under its header.
+      const head = document.getElementById("tp-header").children[251];
+      scroll.scrollLeft = head.offsetLeft; Table.draw();
+      const row = body.querySelector(".tp-row");
+      const cell = row.children[1 + 250 - Table.drawn.c0];
+      const cellBox = cell.getBoundingClientRect(), headBox = head.getBoundingClientRect();
+      const width = body.offsetWidth >= document.getElementById("tp-header").scrollWidth - 1;
+      Table.close(); removeDataset(ds.id);
+      return { cellsPerRow, kept, ordered, text: cell.textContent, index: row.dataset.index, aligned: Math.abs(cellBox.left - headBox.left) < 1, width };
+    });
+    assert.ok(r.cellsPerRow < 60, "only visible columns are drawn (" + r.cellsPerRow + ")");
+    assert.equal(r.kept, true, "rows still in view are reused");
+    assert.equal(r.ordered, true, "document order follows the rows on screen");
+    assert.equal(r.text, r.index + "/250");
+    assert.equal(r.aligned, true, "cells line up with their header");
+    assert.equal(r.width, true);
+  });
+
   // Draw a row of points with each renderer and check the pixels land where
   // Leaflet says the points are.
   for (const renderer of ["webgl", "2d"]) {
