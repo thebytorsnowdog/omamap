@@ -35,6 +35,8 @@ Profiles are limited to 100 MiB so every completed export fits the reopening lim
 | <kbd>/</kbd> | Filter the selected feature's attributes |
 | <kbd>Esc</kbd> | Leave the filter box, then clear the selection |
 
+Clicking a feature opens its attributes in a panel that floats over the right side of the map, so the map itself never resizes or redraws. Close it with × or <kbd>Esc</kbd>, or by clicking an empty spot on the map. Zooming to a feature, fitting datasets and selecting a table row all keep the feature in the part of the map the panel doesn't cover. While the panel is open, the legend moves beside it (or is hidden when the map is too narrow for both).
+
 ### Styling datasets
 
 Each dataset gets a colour from your theme. The ◐ button on a dataset opens its style settings: colour, opacity, line or outline width, point size and outline (same as fill, light, dark or none).
