@@ -616,6 +616,186 @@ function fixtures(dir) {
     assert.deepEqual(result,{last:null,ds:null,order:null});
   });
 
+
+  /* ------------------------- floating inspector -------------------------- */
+  const plots = (n, size, x0, y0, spread) => {
+    let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    return { type: "FeatureCollection", features: Array.from({ length: n }, (_, i) => {
+      const x = x0 + rnd() * spread, y = y0 + rnd() * spread / 2;
+      return { type: "Feature", properties: { id: i, name: "Plot " + i, kind: i % 3 ? "Arable" : "Pasture" },
+        geometry: { type: "Polygon", coordinates: [[[x, y], [x + size, y], [x + size * 0.6, y + size], [x, y + size], [x, y]]] } };
+    }) };
+  };
+  const rect = (sel) => page.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; }, sel);
+  const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+  await check("the feature panel floats over the map: opening and closing it never resizes or redraws the map", async () => {
+    const at = await page.evaluate((fc) => {
+      clearAll();
+      const ds = addDataset({ name: "plots", geojson: fc });
+      STATE.map.setView([55.9, -3.2], 12, { animate: false });
+      window.__mapEvents = { resize: 0, update: 0 };
+      STATE.map.on("resize", () => window.__mapEvents.resize++);
+      STATE.renderer.on("update", () => window.__mapEvents.update++);
+      const c = STATE.map.getSize().divideBy(2);
+      const layer = ds.layers.filter((l) => l._parts.length).sort((a, b) =>
+        STATE.map.layerPointToContainerPoint(a._rawPxBounds.getCenter()).distanceTo(c) - STATE.map.layerPointToContainerPoint(b._rawPxBounds.getCenter()).distanceTo(c))[0];
+      const p = STATE.map.layerPointToContainerPoint(layer._rawPxBounds.getCenter()), m = STATE.map.getContainer().getBoundingClientRect();
+      return { x: m.left + p.x, y: m.top + p.y, size: STATE.map.getSize() };
+    }, plots(40, 0.004, -3.25, 55.88, 0.1));
+    await page.mouse.click(at.x, at.y);
+    await settle(); await settle();
+    assert.equal(await page.locator("#inspector").isVisible(), true, "panel opens on click");
+    let state = await page.evaluate(() => ({ size: STATE.map.getSize(), events: window.__mapEvents }));
+    assert.deepEqual(state.size, at.size, "the map keeps its size");
+    assert.deepEqual(state.events, { resize: 0, update: 0 }, "no resize and no full canvas update");
+    // Keyboard: focus inside the panel, Esc closes it and focus goes back to the map.
+    await page.focus("#insp-close");
+    await page.keyboard.press("Escape");
+    await settle();
+    assert.equal(await page.locator("#inspector").isHidden(), true);
+    assert.equal(await page.evaluate(() => document.activeElement === STATE.map.getContainer()), true, "focus returns to the map");
+    state = await page.evaluate(() => ({ size: STATE.map.getSize(), events: window.__mapEvents }));
+    assert.deepEqual(state.events, { resize: 0, update: 0 }, "closing does not resize either");
+    // The close button works too, and "/" still jumps to the attribute filter.
+    await page.mouse.click(at.x, at.y); await settle();
+    await page.keyboard.press("/");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "attr-filter");
+    await page.keyboard.press("Escape"); await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#inspector").isHidden(), true, "Esc in the filter clears it, a second Esc closes");
+    await page.mouse.click(at.x, at.y); await settle();
+    await page.click("#insp-close");
+    assert.equal(await page.locator("#inspector").isHidden(), true);
+  });
+
+  await check("the floating panel keeps clear of the map controls and legend, in both themes and small windows", async () => {
+    const at = await page.evaluate(() => {
+      const ds = STATE.datasets[0];
+      setColourBy(ds, "kind", "categories"); applyDatasetStyle(ds); renderLegend();
+      const c = STATE.map.getSize().divideBy(2);
+      const layer = ds.layers.filter((l) => l._parts.length)[0];
+      STATE.hits = [{ ds: ds, layer: layer }]; STATE.hitIndex = 0; showSelection();
+      return c;
+    });
+    assert.ok(at);
+    await settle();
+    const check = async (label) => {
+      const insp = await rect("#inspector"), zoom = await rect(".leaflet-control-zoom"), attr = await rect(".leaflet-control-attribution"), wrap = await rect(".map-wrap");
+      assert.equal(overlaps(insp, zoom), false, label + ": zoom buttons uncovered");
+      assert.equal(overlaps(insp, attr), false, label + ": attribution uncovered");
+      assert.ok(insp.left >= wrap.left && insp.right <= wrap.right && insp.top >= wrap.top && insp.bottom <= wrap.bottom, label + ": inside the map");
+      if (await page.locator("#legend").isVisible()) assert.equal(overlaps(insp, await rect("#legend")), false, label + ": legend moved aside");
+      return insp;
+    };
+    const wide = await check("wide");
+    assert.ok(wide.width >= 340, "full width panel");
+    for (const theme of [{ mode: "light", colors: { background: "#e1e2e7", dark_background: "#d0d5e3", foreground: "#3760bf", accent: "#2e7de9" } }, THEME]) {
+      await page.evaluate((t) => OmaMap.applyTheme(t), theme);
+      const colours = await page.evaluate(() => ({ panel: getComputedStyle(el("inspector")).backgroundColor, bar: getComputedStyle(document.querySelector(".status")).backgroundColor, text: getComputedStyle(el("insp-ds")).color, fg: getComputedStyle(document.body).color }));
+      assert.equal(colours.panel, colours.bar, theme.mode + ": panel uses the theme's panel colour");
+      assert.equal(colours.text, colours.fg, theme.mode + ": and its text colour");
+    }
+    for (const [w, h] of [[760, 560], [620, 480], [520, 420]]) {
+      await page.setViewportSize({ width: w, height: h });
+      await settle(); await settle();
+      const insp = await check(w + "x" + h);
+      assert.ok(insp.width >= 200 && insp.height >= 150, w + "x" + h + ": still usable (" + insp.width + "x" + insp.height + ")");
+      assert.equal(await page.locator("#insp-close").isVisible(), true);
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await settle();
+    await page.evaluate(() => clearSelection());
+  });
+
+  await check("selecting a row behind the panel brings the feature into the uncovered part of the map", async () => {
+    const r = await page.evaluate(async () => {
+      const ds = STATE.datasets[0];
+      STATE.map.setView([55.9, -3.2], 14, { animate: false });
+      // A feature just inside the right edge, where the panel will sit.
+      const size = STATE.map.getSize();
+      const target = ds.layers.findIndex((l) => { const b = l.getBounds(); const p = STATE.map.latLngToContainerPoint(b.getCenter()); return p.x > size.x - 250 && p.x < size.x - 60 && p.y > 100 && p.y < size.y - 100; });
+      if (target < 0) { STATE.map.panBy([0, 0]); }
+      Table.open(ds); Table.choose(target, false);
+      await new Promise((res) => setTimeout(res, 400));
+      const b = ds.layers[target].getBounds(), p = STATE.map.latLngToContainerPoint(b.getCenter());
+      const m = STATE.map.getContainer().getBoundingClientRect(), insp = el("inspector").getBoundingClientRect();
+      Table.close(); clearSelection();
+      return { target, x: m.left + p.x, panelLeft: insp.left };
+    });
+    assert.ok(r.target >= 0, "found a feature near the right edge");
+    assert.ok(r.x < r.panelLeft, "feature at " + Math.round(r.x) + " is left of the panel at " + Math.round(r.panelLeft));
+  });
+
+  /* ------------------------ large-layer fast path ------------------------ */
+  await check("large polygon layers draw tiny shapes as matching rectangles; small layers draw as before", async () => {
+    const r = await page.evaluate(async ([big, small]) => {
+      clearAll();
+      const frame = () => new Promise((res) => requestAnimationFrame(() => setTimeout(res, 0)));
+      const B = addDataset({ name: "dense", geojson: big }), S = addDataset({ name: "few", geojson: small });
+      const marked = { big: B.layers.every((l) => l._omaBatch === true), small: S.layers.some((l) => l._omaBatch) };
+      STATE.map.setView([55.75, -3.5], 9, { animate: false }); await frame();
+      const R = STATE.renderer, ctx = R._ctx, cv = R._container;
+      const coverage = () => { const d = ctx.getImageData(0, 0, cv.width, cv.height).data; let s = 0; for (let i = 3; i < d.length; i += 4) s += d[i]; return s / 255; };
+      const full = () => { R._redrawBounds = null; R._redraw(); };
+      const tinyOnScreen = B.layers.filter((l) => l._parts.length && l._rawPxBounds.max.x - l._rawPxBounds.min.x <= OmaBatch.TINY_PX && l._rawPxBounds.max.y - l._rawPxBounds.min.y <= OmaBatch.TINY_PX).length;
+      // Count which layers Leaflet draws itself.
+      let drawn = new Set();
+      const spy = (l) => { const f = l._updatePath; l._updatePath = function () { drawn.add(this); return f.apply(this, arguments); }; };
+      B.layers.forEach(spy); S.layers.forEach(spy);
+      full();
+      const fastCov = coverage();
+      const leafletDrawn = { big: B.layers.filter((l) => drawn.has(l)).length, small: S.layers.filter((l) => drawn.has(l) || !l._parts.length).length };
+      // The same picture drawn entirely by Leaflet.
+      B.layers.forEach((l) => { l._omaBatch = false; }); full();
+      const leafletCov = coverage();
+      B.layers.forEach((l) => { l._omaBatch = true; }); full();
+      // Hit-testing and the selection highlight still work on a tiny shape.
+      const tiny = B.layers.find((l) => l._parts.length && l._rawPxBounds.max.x - l._rawPxBounds.min.x <= 1.5);
+      onMapClick({ layerPoint: tiny._rawPxBounds.getCenter() });
+      const hit = STATE.hits.some((h) => h.layer === tiny);
+      drawn = new Set(); full();
+      const selectedInFull = drawn.has(STATE.hits[0].layer) && STATE.hits[0].layer._omaHighlight === true;
+      clearSelection();
+      const unflagged = tiny._omaHighlight === false;
+      // Restyle and visibility reach the fast path.
+      const px = (l) => { const p = l._rawPxBounds.getCenter().subtract(R._bounds.min).multiplyBy(window.devicePixelRatio || 1); return Array.from(ctx.getImageData(Math.round(p.x), Math.round(p.y), 1, 1).data); };
+      B.style.colour = "#ff0000"; B.style.byField = null; applyDatasetStyle(B); await frame(); await frame();
+      const red = px(tiny);
+      B.style.outline = "none"; B.style.colour = "#0000ff"; B.style.fillOpacity = 1; applyDatasetStyle(B); await frame(); await frame();
+      const unoutlined = coverage();
+      B.layers.forEach((l) => { l._omaBatch = false; }); full();
+      const unoutlinedLeaflet = coverage();
+      B.layers.forEach((l) => { l._omaBatch = true; }); full();
+      B.style.outline = "same"; applyDatasetStyle(B); await frame(); await frame();
+      toggleVisible(B.id); await frame(); await frame();
+      const hidden = px(tiny);
+      toggleVisible(B.id); await frame(); await frame();
+      const shown = px(tiny);
+      // Zoomed in, shapes are no longer tiny and Leaflet draws them in full.
+      STATE.map.setView(tiny.getBounds().getCenter(), 15, { animate: false }); await frame();
+      drawn = new Set(); full();
+      const zoomedFull = B.layers.filter((l) => l._parts.length).every((l) => drawn.has(l));
+      clearAll();
+      return { marked, tinyOnScreen, leafletDrawn, smallCount: S.layers.length, ratio: fastCov / leafletCov, hit, selectedInFull, unflagged, red, unoutlined: unoutlined / Math.max(1, unoutlinedLeaflet), unoutlinedLeaflet, hidden, shown, zoomedFull };
+    }, [plots(3000, 0.002, -4.5, 55.5, 2), plots(30, 0.002, -3.0, 55.6, 0.2)]);
+    assert.deepEqual(r.marked, { big: true, small: false }, "only the large dataset opts in");
+    assert.ok(r.tinyOnScreen > 2500, "most shapes are tiny at this zoom (" + r.tinyOnScreen + ")");
+    assert.ok(r.leafletDrawn.big < 100, "tiny shapes skip Leaflet's path drawing (" + r.leafletDrawn.big + ")");
+    assert.equal(r.leafletDrawn.small, r.smallCount, "small datasets are drawn by Leaflet as before");
+    assert.ok(r.ratio > 0.9 && r.ratio < 1.1, "painted area matches Leaflet's within 10% (ratio " + r.ratio.toFixed(3) + ")");
+    assert.equal(r.hit, true, "a tiny shape is still hit by a click");
+    assert.equal(r.selectedInFull, true, "the selection is drawn in full by Leaflet");
+    assert.equal(r.unflagged, true, "deselecting returns it to the fast path");
+    assert.ok(r.red[0] > 200 && r.red[1] < 90 && r.red[3] > 200, "restyle repaints tiny shapes: " + r.red);
+    // Without an outline only the fill shows; Leaflet has collapsed most of these
+    // shapes to lines, which have no fill area, and the fast path agrees.
+    assert.ok(r.unoutlinedLeaflet < 50 ? r.unoutlined * Math.max(1, r.unoutlinedLeaflet) < 50 : r.unoutlined > 0.85 && r.unoutlined < 1.15,
+      "unoutlined shapes paint like Leaflet's (ratio " + r.unoutlined + ", Leaflet " + r.unoutlinedLeaflet + ")");
+    assert.equal(r.hidden[3], 0, "hiding the dataset clears them");
+    assert.ok(r.shown[3] > 200, "showing it draws them again");
+    assert.equal(r.zoomedFull, true, "zoomed in, every shape is drawn by Leaflet");
+  });
+
   await check("no page errors", async () => { assert.deepEqual(errors, []); });
 
   await browser.close();

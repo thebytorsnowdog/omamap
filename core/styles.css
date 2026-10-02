@@ -61,7 +61,7 @@ kbd {
 .meta { color: var(--fg-dim); }
 .meta b { color: var(--fg); font-weight: 600; }
 
-.body { display: grid; grid-template-columns: 300px 1fr auto; min-height: 0; }
+.body { display: grid; grid-template-columns: 300px 1fr; min-height: 0; }
 
 /* ------------------------------ Buttons ---------------------------------- */
 .btn {
@@ -145,8 +145,10 @@ h2 { margin: 0; font-size: 0.85em; letter-spacing: 0.14em; text-transform: upper
 
 /* -------------------------------- Map ------------------------------------ */
 .center { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.map-wrap { position: relative; min-width: 0; flex: 1; min-height: 120px; }
-#map { position: absolute; inset: 0; background: var(--bg-deep); cursor: default; }
+.map-wrap { position: relative; min-width: 0; flex: 1; min-height: 120px; container-type: size; container-name: mapwrap; }
+/* z-index 0 keeps Leaflet's panes and controls in their own stacking context,
+   so overlays on the map (inspector, legend, loading) layer predictably. */
+#map { position: absolute; inset: 0; z-index: 0; background: var(--bg-deep); cursor: default; }
 #map.leaflet-grab, #map .leaflet-grab { cursor: default; }
 #map.leaflet-dragging .leaflet-grab { cursor: grabbing; }
 .drop-veil {
@@ -254,11 +256,31 @@ body.dragging .drop-veil { display: grid; }
 .tp-cell.nullish { color: var(--muted); font-style: italic; }
 
 /* ----------------------------- Inspector --------------------------------- */
+/* Floats over the map instead of taking a grid column: opening or closing it
+   never resizes the map, so the vector canvas is not redrawn. It stays clear
+   of the zoom buttons (top left) and the attribution (bottom right). */
 .inspector {
-  width: 360px; display: flex; flex-direction: column; min-height: 0;
-  background: var(--bg-alt); border-left: 1px solid var(--line);
+  position: absolute; z-index: 950; top: 10px; right: 10px; bottom: 26px;
+  width: min(360px, calc(100% - 20px)); display: flex; flex-direction: column; min-height: 0;
+  background: var(--bg-alt); border: 1px solid var(--line);
+  box-shadow: 0 6px 24px color-mix(in srgb, #000 35%, transparent);
 }
 .inspector[hidden] { display: none; }
+/* The legend shares the top-right corner: move it beside the open panel. */
+.map-wrap:has(.inspector:not([hidden])) .legend { right: calc(min(360px, 100% - 20px) + 20px); max-width: min(280px, calc(100% - 420px)); }
+@container mapwrap (max-width: 680px) {
+  .map-wrap:has(.inspector:not([hidden])) .legend { display: none; }
+}
+/* Narrow map: leave the zoom buttons uncovered. */
+@container mapwrap (max-width: 440px) {
+  .inspector { left: 52px; right: 6px; width: auto; }
+}
+/* Short map (a tall attribute table below it): use all the height there is. */
+@container mapwrap (max-height: 320px) {
+  .inspector { top: 4px; bottom: 20px; }
+  .inspector .insp-head { padding-top: 4px; padding-bottom: 4px; }
+  .inspector .insp-actions { padding-top: 4px; padding-bottom: 4px; }
+}
 .insp-head {
   display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start;
   padding: 10px 8px 10px 12px; border-bottom: 1px solid var(--line);
@@ -316,6 +338,5 @@ body.dragging .drop-veil { display: grid; }
 @media (max-width: 900px) {
   .body { grid-template-columns: 240px 1fr; }
   .tp-hint { display: none; }
-  .inspector { position: absolute; right: 0; top: 40px; bottom: 26px; width: min(360px, 90vw); z-index: 1500; }
   .keys { display: none; }
 }

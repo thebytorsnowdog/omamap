@@ -51,7 +51,18 @@ const N_POINTS = Number(process.env.BENCH_POINTS || 100000), N_POLYS = Number(pr
     await measure("colour points by category", async () => { setColourBy(P, "owner", "categories"); applyDatasetStyle(P); renderLegend(); });
     await measure("colour points by ranges", async () => { setColourBy(P, "risk", "ranges"); applyDatasetStyle(P); renderLegend(); });
     await measure("theme switch", async () => OmaMap.applyTheme({ mode: "light", colors: { background: "#eeeeee", accent: "#0055ff", green: "#00aa00", blue: "#3366ff" } }));
-    await measure("click identify", async () => { const c = STATE.map.getSize().divideBy(2); onMapClick({ layerPoint: STATE.map.containerPointToLayerPoint(c) }); });
+    const clickCentre = () => { const c = STATE.map.getSize().divideBy(2); onMapClick({ layerPoint: STATE.map.containerPointToLayerPoint(c) }); };
+    await measure("click identify", async () => { clickCentre(); });
+    await measure("close panel (Esc)", async () => { clearSelection(); });
+    await measure("click identify (panel reopens)", async () => { clickCentre(); });
+    await measure("click another feature", async () => { const c = STATE.map.getSize().divideBy(2).add([40, 25]); onMapClick({ layerPoint: STATE.map.containerPointToLayerPoint(c) }); });
+    clearSelection();
+    // Full repaint of the vector canvas (what a pan end, resize or restyle costs).
+    const fullRedraw = () => { const r = STATE.renderer; r._redrawBounds = null; const t = performance.now(); r._redraw(); return performance.now() - t; };
+    { const runs = []; for (let i = 0; i < 7; i++) { await frame(); runs.push(fullRedraw()); } runs.sort((a, b) => a - b);
+      out.push({ name: "vector canvas full redraw (median|worst)", ms: Math.round(runs[3]), freeze: Math.round(runs[6]) }); }
+    await measure("zoom out (painted)", async () => { STATE.map.setZoom(STATE.map.getZoom() - 1, { animate: false }); });
+    await measure("pan back (painted)", async () => { STATE.map.panBy([-300, 0], { animate: false }); });
     await measure("open table (points)", async () => { Table.open(P); });
     await measure("table search", async () => { Table.query = "asset 9999"; Table.refilter(); });
     await measure("table clear search", async () => { Table.query = ""; Table.refilter(); });
@@ -63,20 +74,35 @@ const N_POINTS = Number(process.env.BENCH_POINTS || 100000), N_POLYS = Number(pr
     await measure("hide + show polygons", async () => { toggleVisible(Q.id); toggleVisible(Q.id); });
     await measure("save profile (bounded export)", async () => { await OmaParse.profileBlob(buildProfile()); });
 
-    // Style slider drag: 20 input events on the polygon outline width, one per frame.
-    STATE.styleOpenId = Q.id; renderLayerList();
-    const slider = Array.from(document.querySelectorAll(".style-editor input[type=range]")).find((r) => r.max === "8");
-    await measure("slider drag x30 (polygons)", async () => {
-      const lat = [];
-      for (let i = 0; i < 30; i++) {
-        slider.value = String(1 + (i % 10) * 0.5); slider.dispatchEvent(new Event("input"));
-        const t = performance.now(); await frame(); lat.push(performance.now() - t);
-      }
-      if (window.restyleIdle) await restyleIdle();
-      lat.sort((a, b) => a - b);
-      out.push({ name: "  slider input->paint ms (median|worst)", ms: Math.round(lat[15]), freeze: Math.round(lat[29]) });
-    });
-    STATE.styleOpenId = null; renderLayerList();
+    // Style slider drag: 30 input events on the polygon outline width, one per
+    // frame. Run where the bench left the view (zoomed in on one feature),
+    // then zoomed out over the whole dense polygon layer.
+    const dragSlider = async (label) => {
+      STATE.styleOpenId = Q.id; renderLayerList();
+      const slider = Array.from(document.querySelectorAll(".style-editor input[type=range]")).find((r) => r.max === "8");
+      // Each restyle the drag triggers: restyle work through to the painted frame.
+      const costs = [], realRun = window.runRestyles;
+      window.runRestyles = function () { const t = performance.now(); realRun.apply(this, arguments); requestAnimationFrame(() => costs.push(performance.now() - t)); };
+      await measure("slider drag x30 (" + label + ")", async () => {
+        const lat = [];
+        for (let i = 0; i < 30; i++) {
+          slider.value = String(1 + (i % 10) * 0.5); slider.dispatchEvent(new Event("input"));
+          const t = performance.now(); await frame(); lat.push(performance.now() - t);
+        }
+        if (window.restyleIdle) await restyleIdle();
+        lat.sort((a, b) => a - b);
+        out.push({ name: "  slider input->paint ms (median|worst)", ms: Math.round(lat[15]), freeze: Math.round(lat[29]) });
+      });
+      window.runRestyles = realRun;
+      costs.sort((a, b) => a - b);
+      out.push({ name: "  restyle+paint per step (median|worst)", ms: Math.round(costs[costs.length >> 1] || 0), freeze: Math.round(costs[costs.length - 1] || 0) });
+      STATE.styleOpenId = null; renderLayerList();
+    };
+    await dragSlider("polygons");
+    STATE.map.fitBounds(Q.layer.getBounds(), { animate: false }); await settle();
+    await dragSlider("dense, zoomed out");
+    await measure("theme switch (dense, zoomed out)", async () => OmaMap.applyTheme({ mode: "dark", colors: {} }));
+    await measure("pan (dense, zoomed out)", async () => { STATE.map.panBy([250, 0], { animate: false }); });
 
     // Wide attribute table: draw + layout cost per scroll step.
     const wideCols = Number(BENCH_WIDE_COLS), wide = [];
