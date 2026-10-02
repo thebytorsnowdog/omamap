@@ -74,20 +74,35 @@ const N_POINTS = Number(process.env.BENCH_POINTS || 100000), N_POLYS = Number(pr
     await measure("hide + show polygons", async () => { toggleVisible(Q.id); toggleVisible(Q.id); });
     await measure("save profile (bounded export)", async () => { await OmaParse.profileBlob(buildProfile()); });
 
-    // Style slider drag: 20 input events on the polygon outline width, one per frame.
-    STATE.styleOpenId = Q.id; renderLayerList();
-    const slider = Array.from(document.querySelectorAll(".style-editor input[type=range]")).find((r) => r.max === "8");
-    await measure("slider drag x30 (polygons)", async () => {
-      const lat = [];
-      for (let i = 0; i < 30; i++) {
-        slider.value = String(1 + (i % 10) * 0.5); slider.dispatchEvent(new Event("input"));
-        const t = performance.now(); await frame(); lat.push(performance.now() - t);
-      }
-      if (window.restyleIdle) await restyleIdle();
-      lat.sort((a, b) => a - b);
-      out.push({ name: "  slider input->paint ms (median|worst)", ms: Math.round(lat[15]), freeze: Math.round(lat[29]) });
-    });
-    STATE.styleOpenId = null; renderLayerList();
+    // Style slider drag: 30 input events on the polygon outline width, one per
+    // frame. Run where the bench left the view (zoomed in on one feature),
+    // then zoomed out over the whole dense polygon layer.
+    const dragSlider = async (label) => {
+      STATE.styleOpenId = Q.id; renderLayerList();
+      const slider = Array.from(document.querySelectorAll(".style-editor input[type=range]")).find((r) => r.max === "8");
+      // Each restyle the drag triggers: restyle work through to the painted frame.
+      const costs = [], realRun = window.runRestyles;
+      window.runRestyles = function () { const t = performance.now(); realRun.apply(this, arguments); requestAnimationFrame(() => costs.push(performance.now() - t)); };
+      await measure("slider drag x30 (" + label + ")", async () => {
+        const lat = [];
+        for (let i = 0; i < 30; i++) {
+          slider.value = String(1 + (i % 10) * 0.5); slider.dispatchEvent(new Event("input"));
+          const t = performance.now(); await frame(); lat.push(performance.now() - t);
+        }
+        if (window.restyleIdle) await restyleIdle();
+        lat.sort((a, b) => a - b);
+        out.push({ name: "  slider input->paint ms (median|worst)", ms: Math.round(lat[15]), freeze: Math.round(lat[29]) });
+      });
+      window.runRestyles = realRun;
+      costs.sort((a, b) => a - b);
+      out.push({ name: "  restyle+paint per step (median|worst)", ms: Math.round(costs[costs.length >> 1] || 0), freeze: Math.round(costs[costs.length - 1] || 0) });
+      STATE.styleOpenId = null; renderLayerList();
+    };
+    await dragSlider("polygons");
+    STATE.map.fitBounds(Q.layer.getBounds(), { animate: false }); await settle();
+    await dragSlider("dense, zoomed out");
+    await measure("theme switch (dense, zoomed out)", async () => OmaMap.applyTheme({ mode: "dark", colors: {} }));
+    await measure("pan (dense, zoomed out)", async () => { STATE.map.panBy([250, 0], { animate: false }); });
 
     // Wide attribute table: draw + layout cost per scroll step.
     const wideCols = Number(BENCH_WIDE_COLS), wide = [];
