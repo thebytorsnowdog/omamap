@@ -459,3 +459,22 @@ test("CSV preflight accepts a UTF-8 BOM before quoted headers", () => {
   const fc = P.csvToGeoJSON('\ufeff"lat","lon","note"\n1,2,"a,b"');
   assert.equal(fc.features[0].properties.note,'a,b');
 });
+
+test("a 200k x 20 CSV inside the documented limits is accepted (names are charged once)", () => {
+  const rows = ["lat,lon," + Array.from({ length: 18 }, (_, i) => "field_" + i).join(",")];
+  for (let i = 0; i < 200000; i++) {
+    const r = [51 + (i % 1000) / 1000, -1 - (i % 997) / 1000];
+    for (let c = 2; c < 20; c++) r.push("v" + (i % 50));
+    rows.push(r.join(","));
+  }
+  const fc = P.csvToGeoJSON(rows.join("\n"));
+  assert.equal(fc.features.length, 200000);
+  assert.equal(fc.fields.length, 20);
+  assert.ok(fc.estimatedBytes < P.LIMITS.workspaceBytes);
+});
+
+test("attribute data beyond the budget is refused with a clear reason", () => {
+  const big = "x".repeat(90000);
+  const features = Array.from({ length: 1300 }, () => ({ type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: { a: big } }));
+  assert.throws(() => P.validateFeatureCollection({ type: "FeatureCollection", features }), /200 MiB attribute budget after [\d,]+ features\. Remove unused columns/);
+});
