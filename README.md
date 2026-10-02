@@ -15,7 +15,7 @@ Running `omamap file` again sends the file to the open window. You can also drag
 
 ### Profiles
 
-**Save** (<kbd>Ctrl+S</kbd>) writes a `.omamap` profile: every open dataset with its data, style, visibility and stacking order, plus the map view and basemap. Open it like any other file, from the app, the file manager or `omamap work.omamap`, to pick up where you left off. If datasets are already open, OmaMap asks before replacing them.
+**Save** (<kbd>Ctrl+S</kbd>) writes a `.omamap` profile: every open dataset with its data, style, visibility, stacking order and any warnings shown for it (such as an assumed coordinate system), plus the map view and basemap. Open it like any other file, from the app, the file manager or `omamap work.omamap`, to pick up where you left off. If datasets are already open, OmaMap asks before replacing them.
 
 A profile contains a full copy of the data, so share it with the same care as the data itself. Profiles exported from WIMP (`.sdv-profile.json`) open too.
 
