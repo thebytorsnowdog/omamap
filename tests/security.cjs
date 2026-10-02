@@ -140,7 +140,11 @@ function fixtures() {
       const ds = STATE.datasets[0];
       Table.open(ds);
       Table.draw();
-      const col = Table.columns.findIndex((c) => c.field === "toString") + 1;
+      const k = Table.columns.findIndex((c) => c.field === "toString");
+      // Only columns in view are drawn: bring this one into view first.
+      document.getElementById("tp-scroll").scrollLeft = document.getElementById("tp-header").children[k + 1].offsetLeft;
+      Table.draw();
+      const col = 1 + k - Table.drawn.c0;
       const cells = Array.from(document.querySelectorAll("#tp-body .tp-row")).map((row) => row.children[col].textContent);
       setColourBy(ds, "toString", "categories");
       const bf = ds.style.byField;

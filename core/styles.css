@@ -243,7 +243,7 @@ body.dragging .drop-veil { display: grid; }
 .tp-hcell:hover { color: var(--accent); }
 .tp-body { position: relative; min-width: 100%; }
 .tp-row {
-  position: absolute; left: 0; height: 26px; display: grid; width: max-content; min-width: 100%;
+  position: absolute; left: 0; height: 26px; display: grid; grid-template-columns: var(--tp-cols); width: max-content; min-width: 100%;
   cursor: pointer; border-bottom: 1px solid color-mix(in srgb, var(--line) 40%, transparent);
 }
 .tp-row.odd { background: color-mix(in srgb, var(--bg-raised) 35%, transparent); }
