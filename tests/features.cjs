@@ -616,6 +616,116 @@ function fixtures(dir) {
     assert.deepEqual(result,{last:null,ds:null,order:null});
   });
 
+
+  /* ------------------------- floating inspector -------------------------- */
+  const plots = (n, size, x0, y0, spread) => {
+    let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    return { type: "FeatureCollection", features: Array.from({ length: n }, (_, i) => {
+      const x = x0 + rnd() * spread, y = y0 + rnd() * spread / 2;
+      return { type: "Feature", properties: { id: i, name: "Plot " + i, kind: i % 3 ? "Arable" : "Pasture" },
+        geometry: { type: "Polygon", coordinates: [[[x, y], [x + size, y], [x + size * 0.6, y + size], [x, y + size], [x, y]]] } };
+    }) };
+  };
+  const rect = (sel) => page.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; }, sel);
+  const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+  await check("the feature panel floats over the map: opening and closing it never resizes or redraws the map", async () => {
+    const at = await page.evaluate((fc) => {
+      clearAll();
+      const ds = addDataset({ name: "plots", geojson: fc });
+      STATE.map.setView([55.9, -3.2], 12, { animate: false });
+      window.__mapEvents = { resize: 0, update: 0 };
+      STATE.map.on("resize", () => window.__mapEvents.resize++);
+      STATE.renderer.on("update", () => window.__mapEvents.update++);
+      const c = STATE.map.getSize().divideBy(2);
+      const layer = ds.layers.filter((l) => l._parts.length).sort((a, b) =>
+        STATE.map.layerPointToContainerPoint(a._rawPxBounds.getCenter()).distanceTo(c) - STATE.map.layerPointToContainerPoint(b._rawPxBounds.getCenter()).distanceTo(c))[0];
+      const p = STATE.map.layerPointToContainerPoint(layer._rawPxBounds.getCenter()), m = STATE.map.getContainer().getBoundingClientRect();
+      return { x: m.left + p.x, y: m.top + p.y, size: STATE.map.getSize() };
+    }, plots(40, 0.004, -3.25, 55.88, 0.1));
+    await page.mouse.click(at.x, at.y);
+    await settle(); await settle();
+    assert.equal(await page.locator("#inspector").isVisible(), true, "panel opens on click");
+    let state = await page.evaluate(() => ({ size: STATE.map.getSize(), events: window.__mapEvents }));
+    assert.deepEqual(state.size, at.size, "the map keeps its size");
+    assert.deepEqual(state.events, { resize: 0, update: 0 }, "no resize and no full canvas update");
+    // Keyboard: focus inside the panel, Esc closes it and focus goes back to the map.
+    await page.focus("#insp-close");
+    await page.keyboard.press("Escape");
+    await settle();
+    assert.equal(await page.locator("#inspector").isHidden(), true);
+    assert.equal(await page.evaluate(() => document.activeElement === STATE.map.getContainer()), true, "focus returns to the map");
+    state = await page.evaluate(() => ({ size: STATE.map.getSize(), events: window.__mapEvents }));
+    assert.deepEqual(state.events, { resize: 0, update: 0 }, "closing does not resize either");
+    // The close button works too, and "/" still jumps to the attribute filter.
+    await page.mouse.click(at.x, at.y); await settle();
+    await page.keyboard.press("/");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "attr-filter");
+    await page.keyboard.press("Escape"); await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#inspector").isHidden(), true, "Esc in the filter clears it, a second Esc closes");
+    await page.mouse.click(at.x, at.y); await settle();
+    await page.click("#insp-close");
+    assert.equal(await page.locator("#inspector").isHidden(), true);
+  });
+
+  await check("the floating panel keeps clear of the map controls and legend, in both themes and small windows", async () => {
+    const at = await page.evaluate(() => {
+      const ds = STATE.datasets[0];
+      setColourBy(ds, "kind", "categories"); applyDatasetStyle(ds); renderLegend();
+      const c = STATE.map.getSize().divideBy(2);
+      const layer = ds.layers.filter((l) => l._parts.length)[0];
+      STATE.hits = [{ ds: ds, layer: layer }]; STATE.hitIndex = 0; showSelection();
+      return c;
+    });
+    assert.ok(at);
+    await settle();
+    const check = async (label) => {
+      const insp = await rect("#inspector"), zoom = await rect(".leaflet-control-zoom"), attr = await rect(".leaflet-control-attribution"), wrap = await rect(".map-wrap");
+      assert.equal(overlaps(insp, zoom), false, label + ": zoom buttons uncovered");
+      assert.equal(overlaps(insp, attr), false, label + ": attribution uncovered");
+      assert.ok(insp.left >= wrap.left && insp.right <= wrap.right && insp.top >= wrap.top && insp.bottom <= wrap.bottom, label + ": inside the map");
+      if (await page.locator("#legend").isVisible()) assert.equal(overlaps(insp, await rect("#legend")), false, label + ": legend moved aside");
+      return insp;
+    };
+    const wide = await check("wide");
+    assert.ok(wide.width >= 340, "full width panel");
+    for (const theme of [{ mode: "light", colors: { background: "#e1e2e7", dark_background: "#d0d5e3", foreground: "#3760bf", accent: "#2e7de9" } }, THEME]) {
+      await page.evaluate((t) => OmaMap.applyTheme(t), theme);
+      const colours = await page.evaluate(() => ({ panel: getComputedStyle(el("inspector")).backgroundColor, bar: getComputedStyle(document.querySelector(".status")).backgroundColor, text: getComputedStyle(el("insp-ds")).color, fg: getComputedStyle(document.body).color }));
+      assert.equal(colours.panel, colours.bar, theme.mode + ": panel uses the theme's panel colour");
+      assert.equal(colours.text, colours.fg, theme.mode + ": and its text colour");
+    }
+    for (const [w, h] of [[760, 560], [620, 480], [520, 420]]) {
+      await page.setViewportSize({ width: w, height: h });
+      await settle(); await settle();
+      const insp = await check(w + "x" + h);
+      assert.ok(insp.width >= 200 && insp.height >= 150, w + "x" + h + ": still usable (" + insp.width + "x" + insp.height + ")");
+      assert.equal(await page.locator("#insp-close").isVisible(), true);
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await settle();
+    await page.evaluate(() => clearSelection());
+  });
+
+  await check("selecting a row behind the panel brings the feature into the uncovered part of the map", async () => {
+    const r = await page.evaluate(async () => {
+      const ds = STATE.datasets[0];
+      STATE.map.setView([55.9, -3.2], 14, { animate: false });
+      // A feature just inside the right edge, where the panel will sit.
+      const size = STATE.map.getSize();
+      const target = ds.layers.findIndex((l) => { const b = l.getBounds(); const p = STATE.map.latLngToContainerPoint(b.getCenter()); return p.x > size.x - 250 && p.x < size.x - 60 && p.y > 100 && p.y < size.y - 100; });
+      if (target < 0) { STATE.map.panBy([0, 0]); }
+      Table.open(ds); Table.choose(target, false);
+      await new Promise((res) => setTimeout(res, 400));
+      const b = ds.layers[target].getBounds(), p = STATE.map.latLngToContainerPoint(b.getCenter());
+      const m = STATE.map.getContainer().getBoundingClientRect(), insp = el("inspector").getBoundingClientRect();
+      Table.close(); clearSelection();
+      return { target, x: m.left + p.x, panelLeft: insp.left };
+    });
+    assert.ok(r.target >= 0, "found a feature near the right edge");
+    assert.ok(r.x < r.panelLeft, "feature at " + Math.round(r.x) + " is left of the panel at " + Math.round(r.panelLeft));
+  });
+
   await check("no page errors", async () => { assert.deepEqual(errors, []); });
 
   await browser.close();
