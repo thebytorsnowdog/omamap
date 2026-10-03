@@ -6,6 +6,7 @@
 
 #include "scheme.h"
 #include "theme.h"
+#include "trusted_core.h"
 #include "window.h"
 
 #include <QApplication>
@@ -24,27 +25,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
-
-// The core is code the app runs, so it must not be a folder another local
-// user can change: refuse one that is writable by group or others, or owned
-// by someone other than this user or root.
-static bool trustedCore(const QString &dir)
-{
-    const QFileInfo info(dir);
-    if (!info.isDir() || !QFileInfo::exists(dir + QStringLiteral("/index.html"))) return false;
-#ifdef Q_OS_LINUX
-    const uint owner = info.ownerId();
-    if (owner != 0 && owner != uint(geteuid())) {
-        qWarning("omamap: ignoring %s: owned by another user", qPrintable(dir));
-        return false;
-    }
-    if (info.permission(QFileDevice::WriteGroup) || info.permission(QFileDevice::WriteOther)) {
-        qWarning("omamap: ignoring %s: writable by other users", qPrintable(dir));
-        return false;
-    }
-#endif
-    return true;
-}
 
 static QString coreDirectory()
 {
