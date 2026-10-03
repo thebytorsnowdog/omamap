@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const zlib = require("node:zlib");
+const vm = require("node:vm");
 
 const core = path.join(__dirname, "..", "core");
 globalThis.self = globalThis;
@@ -87,6 +88,37 @@ test("GeoJSON rejects bad geometry", () => {
   assert.throws(() => P.validateFeatureCollection({ type: "Point", coordinates: [400000, 600000] }), /WGS84/);
   assert.throws(() => P.validateFeatureCollection({ type: "Point", coordinates: ["1", "2"] }), /finite numbers/);
   assert.throws(() => P.validateFeatureCollection({ type: "FeatureCollection", features: [] }), /no features/);
+});
+
+test("every supported geometry validates and contributes all positions to the budget", () => {
+  const ring = [[0, 0], [1, 0], [1, 1], [0, 0]];
+  const cases = [
+    [{ type: "Point", coordinates: [0, 0, 3, 4] }, 1],
+    [{ type: "MultiPoint", coordinates: [[0, 0], [1, 1]] }, 2],
+    [{ type: "LineString", coordinates: [[0, 0], [1, 1]] }, 2],
+    [{ type: "MultiLineString", coordinates: [[[0, 0], [1, 1]], [[2, 2], [3, 3]]] }, 4],
+    [{ type: "Polygon", coordinates: [ring, ring] }, 8],
+    [{ type: "MultiPolygon", coordinates: [[ring], [ring, ring]] }, 12],
+    [{ type: "GeometryCollection", geometries: [{ type: "Point", coordinates: [0, 0] }, { type: "Polygon", coordinates: [ring] }] }, 5]
+  ];
+  for (const [geometry, count] of cases) {
+    const fc = P.validateFeatureCollection(geometry);
+    assert.equal(fc.coordinateCount, count, geometry.type);
+    assert.deepEqual(fc.features[0].geometry, geometry);
+    assert.ok(fc.estimatedBytes >= count * 64);
+  }
+});
+
+test("empty multipart geometries and invalid positions cannot reach rendering", () => {
+  for (const type of ["MultiPoint", "LineString", "MultiLineString", "Polygon", "MultiPolygon"]) {
+    assert.throws(() => P.validateFeatureCollection({ type, coordinates: [] }), /requires at least/);
+  }
+  assert.throws(() => P.validateFeatureCollection({ type: "MultiLineString", coordinates: [[[0, 0]]] }), /at least two/);
+  assert.throws(() => P.validateFeatureCollection({ type: "MultiPolygon", coordinates: [[]] }), /at least one ring/);
+  assert.throws(() => P.validateFeatureCollection({ type: "GeometryCollection", geometries: [] }), /at least one geometry/);
+  for (const coordinates of [[0], [0, 0, 0, 0, 0], [NaN, 0], [0, Infinity], [0, -91], [-181, 0]]) {
+    assert.throws(() => P.validateFeatureCollection({ type: "Point", coordinates }), /numbers|bounds/);
+  }
 });
 
 test("prototype-pollution property names are rejected", () => {
@@ -581,4 +613,31 @@ test("KML and GPX inside a ZIP or KMZ come back for the page to convert", async 
   const two = [{ xml: { text: "", ext: "kml" } }, { xml: { text: "", ext: "kml" } }];
   const run = () => ({ type: "FeatureCollection", features: new Array(600000).fill(0) });
   await assert.rejects(P.resolveXmlLayers(two, run), /together exceed/);
+});
+
+test("parse worker dispatches jobs, reports rejected inputs and remains usable", async () => {
+  const replies = [], imports = [];
+  const context = vm.createContext({
+    OmaParse: P,
+    importScripts: (...names) => imports.push(...names),
+    self: { postMessage: (message) => replies.push(message) }
+  });
+  vm.runInContext(fs.readFileSync(path.join(core, "parse-worker.js"), "utf8"), context);
+  assert.deepEqual(imports, ["vendor/fflate.js", "vendor/shp.js", "vendor/papaparse.min.js", "parse.js"]);
+  await context.self.onmessage({ data: { id: 1, kind: "file", name: "invalid.geojson", buffer: bytes("{") } });
+  assert.equal(replies[0].id, 1);
+  assert.equal(replies[0].ok, false);
+  assert.match(replies[0].error, /not valid JSON/);
+  await context.self.onmessage({ data: { id: 2, kind: "unsupported" } });
+  assert.equal(replies[1].id, 2);
+  assert.equal(replies[1].ok, false);
+  assert.equal(replies[1].error, "Unknown parse job.");
+  await context.self.onmessage({ data: { id: 3, kind: "file", name: "valid.geojson", buffer: bytes(POINT_FC) } });
+  assert.equal(replies[2].id, 3);
+  assert.equal(replies[2].ok, true);
+  assert.equal(replies[2].datasets[0].geojson.features[0].properties.name, "Edinburgh");
+  await context.self.onmessage({ data: { id: 4, kind: "shapefile-set", name: "sites", parts: { shp: ab(makeShp([[-3.2, 55.9]])) } } });
+  assert.equal(replies[3].id, 4);
+  assert.equal(replies[3].ok, true);
+  assert.deepEqual(replies[3].datasets[0].geojson.features[0].geometry.coordinates, [-3.2, 55.9]);
 });
