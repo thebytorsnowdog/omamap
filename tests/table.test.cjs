@@ -110,3 +110,32 @@ test("a superseded cooperative search cannot overwrite the latest results", asyn
   await stale;
   assert.deepEqual(Array.from(t.order), [299], "resuming the stale search preserves the newer results");
 });
+
+test("a selection made while the initial filter is yielding is revealed when rows are ready", async () => {
+  const timers = [];
+  let now = 0;
+  const { table: t, elements } = table(Array.from({ length: 300 }, () => ({ name: "road" })), {
+    performance: { now: () => now },
+    setTimeout(fn) { timers.push(fn); }
+  });
+  elements.set("tp-scroll", { scrollTop: 0, clientHeight: 104 });
+  elements.set("tp-header", { offsetHeight: 26, scrollWidth: 400 });
+  const rowText = t.rowText;
+  t.rowText = function (i) {
+    if (i === 0) now += 10;
+    return rowText.call(this, i);
+  };
+  t.query = "road";
+  const pending = t.refilter();
+  assert.equal(timers.length, 1);
+  t.reveal(299);
+  assert.equal(elements.get("tp-scroll").scrollTop, 0, "rows are not known yet");
+  timers.shift()();
+  await pending;
+  const scroll = elements.get("tp-scroll");
+  const selectedTop = 299 * 26 + 26;
+  assert.equal(t.selected, 299);
+  assert.ok(selectedTop >= scroll.scrollTop + 26 && selectedTop + 26 <= scroll.scrollTop + scroll.clientHeight,
+    "the selected row is inside the viewport after filtering");
+  assert.equal(t.pendingReveal, false);
+});
