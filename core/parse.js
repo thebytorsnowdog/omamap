@@ -711,10 +711,15 @@
   function checkShapefile(shpBytes, dbfBytes) {
     const shp = new DataView(shpBytes.buffer, shpBytes.byteOffset, shpBytes.byteLength);
     if (shpBytes.byteLength < 100 || shp.getInt32(0) !== 9994) throw new Error("The .shp file is not a shapefile.");
+    if (shp.getInt32(24) * 2 !== shpBytes.byteLength || shp.getInt32(28, true) !== 1000) throw new Error("The .shp file is truncated or its header is inconsistent.");
     let records = 0;
-    for (let offset = 100; offset + 8 <= shpBytes.byteLength;) {
+    for (let offset = 100; offset < shpBytes.byteLength;) {
+      if (offset + 8 > shpBytes.byteLength) throw new Error("The .shp file has a truncated record header.");
       const length = shp.getInt32(offset + 4) * 2;   // big-endian, in 16-bit words
-      if (length < 0 || offset + 8 + length > shpBytes.byteLength) break;   // where shpjs stops too
+      // shpjs silently stops at a truncated record and returns the preceding
+      // features. Reject the file instead of presenting an incomplete layer.
+      if (length < 0 || (length > 0 && length < 4)) throw new Error("The .shp file has an invalid record length.");
+      if (offset + 8 + length > shpBytes.byteLength) throw new Error("The .shp file has a truncated record.");
       if (++records > LIMITS.features) throw new Error("Shapefile has more than " + LIMITS.features.toLocaleString() + " records.");
       offset += 8 + length;
     }
