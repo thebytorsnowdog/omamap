@@ -159,6 +159,21 @@ test("GeoJSON declaring EPSG:27700 is converted", async () => {
   assert.match(ds.warnings[0], /EPSG:27700/);
 });
 
+test("BNG GeometryCollections enforce the nesting limit before reprojection", () => {
+  const point = '{"type":"Point","coordinates":[325165,673490,42]}';
+  const collection = '{"type":"GeometryCollection","geometries":[';
+  const prefix = '{"type":"Feature","properties":{},"crs":{"properties":{"name":"EPSG:27700"}},"geometry":';
+  const valid = P.jsonToGeoJSON(prefix + collection.repeat(P.LIMITS.geometryDepth) + point + ']}'.repeat(P.LIMITS.geometryDepth) + '}');
+  let geometry = valid.features[0].geometry;
+  for (let i = 0; i < P.LIMITS.geometryDepth; i++) geometry = geometry.geometries[0];
+  assert.ok(metres(geometry.coordinates, [-3.1998812, 55.9485944]) < 1);
+  assert.equal(geometry.coordinates[2], 42);
+  assert.equal(valid.coordinateCount, 1);
+  // Construct the JSON directly so the test does not hit JSON.stringify's
+  // own stack limit before exercising the parser's hostile-input guard.
+  assert.throws(() => P.jsonToGeoJSON(prefix + collection.repeat(15000) + point + ']}'.repeat(15000) + '}'), /GeometryCollection nesting limit exceeded/);
+});
+
 test("zipped shapefile fixture loads one point", async () => {
   const layers = await P.parseBytes("point.zip", fixture("point.zip"));
   assert.equal(layers.length, 1);

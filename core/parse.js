@@ -333,16 +333,19 @@
 
   function reprojectGeoJsonBng(data) {
     const counter = { count: 0 };
-    const geom = function (g) {
+    const geom = function (g, depth) {
       if (!g || typeof g !== "object") return g;
-      if (g.type === "GeometryCollection" && Array.isArray(g.geometries)) return Object.assign({}, g, { geometries: g.geometries.map(geom) });
+      if (depth > LIMITS.geometryDepth) throw new Error("GeometryCollection nesting limit exceeded.");
+      if (g.type === "GeometryCollection" && Array.isArray(g.geometries)) return Object.assign({}, g, {
+        geometries: g.geometries.map(function (child) { return geom(child, depth + 1); })
+      });
       return Object.assign({}, g, { coordinates: reprojectBng(g.coordinates, 0, counter) });
     };
     if (data.type === "FeatureCollection" && Array.isArray(data.features)) {
-      return Object.assign({}, data, { features: data.features.map(function (f) { return f && typeof f === "object" ? Object.assign({}, f, { geometry: geom(f.geometry) }) : f; }) });
+      return Object.assign({}, data, { features: data.features.map(function (f) { return f && typeof f === "object" ? Object.assign({}, f, { geometry: geom(f.geometry, 0) }) : f; }) });
     }
-    if (data.type === "Feature") return Object.assign({}, data, { geometry: geom(data.geometry) });
-    return geom(data);
+    if (data.type === "Feature") return Object.assign({}, data, { geometry: geom(data.geometry, 0) });
+    return geom(data, 0);
   }
 
   function parseJson(text) {
