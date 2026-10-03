@@ -1,6 +1,6 @@
 "use strict";
 /* Parser and validation tests, run in Node against the same vendored
-   libraries the app ships. Usage: node --test tests/ */
+   libraries the app ships. Usage: npm test */
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");

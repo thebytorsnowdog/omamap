@@ -3,7 +3,7 @@
    asks for), the page CSP (core/index.html, and the same policy sent as a
    header by host/scheme.cpp) and the native RequestFilter allow-list. A host
    missing from any of them silently breaks a basemap; an extra one widens
-   what the app may contact. Usage: node --test tests/ */
+   what the app may contact. Usage: npm test */
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
