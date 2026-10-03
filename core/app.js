@@ -244,13 +244,13 @@ function applyDatasetStyle(ds) {
 function findDs(id) { return STATE.datasets.find(function (d) { return d.id === id; }); }
 
 function geometrySummary(geojson) {
-  const set = {};
-  geojson.features.forEach(function (f) {
-    const g = f.geometry;
-    if (g.type === "GeometryCollection") g.geometries.forEach(function (gg) { set[gg.type] = true; });
-    else set[g.type] = true;
-  });
-  return Object.keys(set);
+  const types = new Set();
+  const visit = function (g) {
+    if (g.type === "GeometryCollection") g.geometries.forEach(visit);
+    else types.add(g.type);
+  };
+  geojson.features.forEach(function (f) { visit(f.geometry); });
+  return Array.from(types);
 }
 
 // Drive a generator in short slices so painting, input and Cancel can run
