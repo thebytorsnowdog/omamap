@@ -451,6 +451,24 @@ test("a .shp of millions of empty records is refused before features are built",
   await assert.rejects(P.parseShapefileSet("junk", { shp: ab(Buffer.alloc(200)) }), /not a shapefile/);
 });
 
+test("truncated shapefiles are rejected instead of importing a partial layer", async () => {
+  const complete = makeShp([[-3.2, 55.9], [-3.9, 56.1]]);
+  const truncated = Buffer.from(complete.subarray(0, complete.length - 10));
+  await assert.rejects(P.parseShapefileSet("truncated", { shp: ab(truncated) }), /\.shp.*truncated|\.shp.*inconsistent/);
+  // Even a forged header matching the short file must not hide a partial
+  // record, negative record length, or trailing partial record header.
+  truncated.writeInt32BE(truncated.length / 2, 24);
+  await assert.rejects(P.parseShapefileSet("truncated", { shp: ab(truncated) }), /\.shp.*truncated/);
+  const negative = Buffer.from(complete);
+  negative.writeInt32BE(-1, 132);
+  await assert.rejects(P.parseShapefileSet("negative", { shp: ab(negative) }), /\.shp.*record/);
+  const trailing = Buffer.concat([complete, Buffer.alloc(2)]);
+  trailing.writeInt32BE(trailing.length / 2, 24);
+  await assert.rejects(P.parseShapefileSet("trailing", { shp: ab(trailing) }), /\.shp.*truncated/);
+  await assert.rejects(P.parseBytes("truncated.zip", makeZip({ "x.shp": truncated })), /\.shp.*truncated/);
+});
+
+
 test("a CSV with more than 10 million cells is refused before features are built", () => {
   // 100 MiB of one-character cells needed about 3 GiB once built.
   const header = ["lat", "lon"].concat(Array.from({ length: 498 }, (_, i) => "c" + i)).join(",");
