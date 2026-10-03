@@ -73,3 +73,19 @@ test("numeric ranges use deterministic quantiles and include the maximum", () =>
   assert.equal(numeric.classOf[6], 4, "the inclusive final range contains the maximum");
   assert.equal(numeric.classOf[7], S.CLASS_MISSING);
 });
+
+test("numeric categories preserve negative signs and scientific exponents in ramp order", () => {
+  const ds = dataset([-10, -2, -1, 0, "1e-3", 1, 2, 10]);
+  S.setColourBy(ds, "value", "categories", false);
+  assert.deepEqual(Array.from(ds.style.byField.classes, (c) => c.key), ["-10", "-2", "-1", "0", "1e-3", "1", "2", "10"]);
+  assert.equal(ds.style.byField.colouring, "ramp");
+  assert.deepEqual(Array.from(ds.classOf), [0, 1, 2, 3, 4, 5, 6, 7]);
+});
+
+test("semantic category labels still normalize hyphens and underscores", () => {
+  const ds = dataset(["out-of-service", "out_of_service", "OUT OF SERVICE", "in service"]);
+  S.setColourBy(ds, "value", "categories", false);
+  assert.deepEqual(Array.from(ds.style.byField.classes, (c) => [c.key, c.count, c.meaning]), [
+    ["in service", 1, "good"], ["out of service", 3, "bad"]
+  ]);
+});
