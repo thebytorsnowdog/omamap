@@ -42,7 +42,10 @@ function defaultStyle(ds) {
 function normalizeValue(v) {
   if (v === null || v === undefined) return "";
   if (typeof v === "object") return JSON.stringify(v);
-  return String(v).trim().toLowerCase().replace(/[_\-\s]+/g, " ");
+  const text = String(v).trim().toLowerCase();
+  // Hyphens in semantic labels are separators; signs and exponents in
+  // numeric categories must survive so sorting and colour ramps stay numeric.
+  return numericValue(v) === null ? text.replace(/[_\-\s]+/g, " ") : text;
 }
 
 function numericValue(v) {
