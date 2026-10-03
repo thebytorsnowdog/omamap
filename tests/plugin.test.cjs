@@ -2,7 +2,7 @@
 /* The Omarchy bar widget runs unsandboxed inside the desktop shell, and
    `omarchy plugin add` clones this whole repository. These tests run the
    widget's JavaScript functions against hostile recent.json entries and
-   check what the plugin exposes to the shell. Usage: node --test tests/ */
+   check what the plugin exposes to the shell. Usage: npm test */
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");

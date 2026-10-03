@@ -5,7 +5,7 @@
   "description": "Spatial data viewer for Omarchy",
   "license": "MIT",
   "scripts": {
-    "test": "node --test tests/",
+    "test": "node --test tests/*.test.cjs",
     "lint": "eslint .",
     "test:browser": "node tests/browser.cjs && node tests/features.cjs && node tests/security.cjs",
     "serve": "python3 -m http.server 8765 --bind 127.0.0.1 --directory core"
