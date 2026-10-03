@@ -140,8 +140,8 @@ Window::Window(QWebEngineProfile *profile, SchemeHandler *scheme, ThemeWatcher *
             fprintf(stderr, "OMAMAP_SELFTEST_READY\n");
             fflush(stderr);
             const QString script = qEnvironmentVariable("OMAMAP_SELFTEST_JS");
-            if (!script.isEmpty()) QTimer::singleShot(2500, this, [this, script] { this->page()->runJavaScript(script); });
-            QTimer::singleShot(qEnvironmentVariableIntValue("OMAMAP_SELFTEST_DELAY") ?: 4000, this, &Window::selfTest);
+            if (!script.isEmpty()) this->page()->runJavaScript(script);
+            selfTestWhenReady(++m_selfTestGeneration, QDateTime::currentMSecsSinceEpoch() + 45000);
         }
     });
     connect(profile, &QWebEngineProfile::downloadRequested, this, &Window::saveDownload);
@@ -265,6 +265,26 @@ void Window::flush()
     Recent::addMany(opened);   // one rewrite of the list per batch, not per file
     const QString json = QString::fromUtf8(QJsonDocument(list).toJson(QJsonDocument::Compact));
     page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.openUrls(%1);").arg(json));
+}
+
+// Test completion follows the requested page condition, not a guessed load
+// time. The timer only polls that condition; its deadline is a failure bound.
+// A recovered renderer starts a new generation so old callbacks cannot quit it.
+void Window::selfTestWhenReady(int generation, qint64 deadline)
+{
+    if (!m_ready || generation != m_selfTestGeneration) return;
+    QString condition = qEnvironmentVariable("OMAMAP_SELFTEST_WAIT");
+    if (condition.isEmpty()) condition = QStringLiteral("Parser.jobs.size === 0 && document.getElementById('loading').hidden");
+    page()->runJavaScript(QStringLiteral("Boolean(%1)").arg(condition), [this, generation, deadline](const QVariant &result) {
+        if (!m_ready || generation != m_selfTestGeneration) return;
+        if (result.toBool()) { selfTest(); return; }
+        if (QDateTime::currentMSecsSinceEpoch() >= deadline) {
+            qCritical("omamap: self-test condition was not reached before the deadline");
+            QApplication::exit(1);
+            return;
+        }
+        QTimer::singleShot(25, this, [this, generation, deadline] { selfTestWhenReady(generation, deadline); });
+    });
 }
 
 // OMAMAP_SELFTEST=1: report page state as JSON on stdout, optionally save a

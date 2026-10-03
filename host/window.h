@@ -35,6 +35,7 @@ private:
     void pushTheme();
     void flush();
     void selfTest();
+    void selfTestWhenReady(int generation, qint64 deadline);
     void saveDownload(QWebEngineDownloadRequest *download);
 
     SchemeHandler *m_scheme;
@@ -42,5 +43,6 @@ private:
     QStringList m_pending;
     bool m_ready = false;
     bool m_recovered = false;
+    int m_selfTestGeneration = 0;
     QList<qint64> m_crashes;
 };
