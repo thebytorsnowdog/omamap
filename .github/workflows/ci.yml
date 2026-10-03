@@ -26,7 +26,7 @@ jobs:
       - run: npm run lint
       - run: npm test
   checks:
-    name: Browser and native integration
+    name: OmaMap checks
     needs: unit
     runs-on: ubuntu-24.04
     timeout-minutes: 20
