@@ -727,15 +727,15 @@
     const dbf = new DataView(dbfBytes.buffer, dbfBytes.byteOffset, dbfBytes.byteLength);
     if (dbfBytes.byteLength < 33) throw new Error("The .dbf file is truncated.");
     const rows = dbf.getUint32(4, true), headerLength = dbf.getUint16(8, true), rowLength = dbf.getUint16(10, true);
-    let fields = 0;
-    for (let offset = 32; offset < headerLength - 1 && offset + 32 < dbfBytes.byteLength; offset += 32) {
-      fields++;
-      if (dbf.getUint8(offset + 32) === 13) break;
-    }
+    if (headerLength < 33 || headerLength > dbfBytes.byteLength || (headerLength - 33) % 32 !== 0 || dbf.getUint8(headerLength - 1) !== 13) throw new Error("The .dbf file header is inconsistent.");
+    const fields = (headerLength - 33) / 32;
     if (rows > LIMITS.features) throw new Error("The .dbf file has more than " + LIMITS.features.toLocaleString() + " records.");
     if (fields > LIMITS.propertiesPerFeature) throw new Error("The .dbf file has more than " + LIMITS.propertiesPerFeature + " fields.");
     if (rows * fields > LIMITS.cells) throw new Error("The .dbf file has more than " + LIMITS.cells.toLocaleString() + " values.");
-    if (!rowLength || headerLength + rows * rowLength > dbfBytes.byteLength) throw new Error("The .dbf file is truncated or its header is inconsistent.");
+    let expectedRowLength = 1; // the deletion flag precedes every record
+    for (let offset = 32; offset < headerLength - 1; offset += 32) expectedRowLength += dbf.getUint8(offset + 16);
+    if (rowLength !== expectedRowLength || headerLength + rows * rowLength > dbfBytes.byteLength) throw new Error("The .dbf file is truncated or its header is inconsistent.");
+    if (rows !== records) throw new Error("The .shp and .dbf record counts disagree.");
   }
 
   async function shapefileParts(parts) {

@@ -469,6 +469,20 @@ test("truncated shapefiles are rejected instead of importing a partial layer", a
 });
 
 
+test("shapefile attributes must match the geometry count and DBF record layout", async () => {
+  const one = makeShp([[-3.2, 55.9]]), two = makeShp([[-3.2, 55.9], [-3.9, 56.1]]);
+  await assert.rejects(P.parseShapefileSet("extra", { shp: ab(one), dbf: ab(makeDbf(["A", "B"])) }), /record counts.*disagree/);
+  await assert.rejects(P.parseShapefileSet("missing", { shp: ab(two), dbf: ab(makeDbf(["A"])) }), /record counts.*disagree/);
+  const narrow = makeDbf(["First", "Second"]);
+  narrow.writeUInt16LE(1, 10);
+  await assert.rejects(P.parseShapefileSet("overlap", { shp: ab(two), dbf: ab(narrow) }), /\.dbf.*inconsistent/);
+  const noTerminator = makeDbf(["A"]);
+  noTerminator[64] = 0;
+  await assert.rejects(P.parseShapefileSet("header", { shp: ab(one), dbf: ab(noTerminator) }), /\.dbf.*inconsistent/);
+  const [valid] = await P.parseShapefileSet("complete", { shp: ab(two), dbf: ab(makeDbf(["First", "Second"])) });
+  assert.deepEqual(valid.geojson.features.map((f) => f.properties.name), ["First", "Second"]);
+});
+
 test("a CSV with more than 10 million cells is refused before features are built", () => {
   // 100 MiB of one-character cells needed about 3 GiB once built.
   const header = ["lat", "lon"].concat(Array.from({ length: 498 }, (_, i) => "c" + i)).join(",");
