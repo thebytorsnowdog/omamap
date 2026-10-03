@@ -1,7 +1,7 @@
 "use strict";
 /* Geometry of the large-layer fast path (core/batchcanvas.js): a tiny shape
    becomes one rectangle with the same centre and painted area as what
-   Leaflet would draw. Usage: node --test tests/ */
+   Leaflet would draw. Usage: npm test */
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");

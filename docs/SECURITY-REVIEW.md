@@ -2,64 +2,59 @@
 
 ## Scope and method
 
-This review covered the first-party web core, Qt host, Omarchy widget, packaging and CI definitions, committed browser dependencies, npm lockfile, and the complete reachable Git history. It is a source review and regression-test pass, not a formal penetration test or third-party audit.
+This pass reviewed the first-party web core, Qt host, Omarchy widget, packaging, CI, npm development dependencies and vendored browser libraries. It also scanned the complete Git history reachable from the checkout at the start of the review: 47 commits and 242 distinct blobs, through `4531008`. The checkout was not shallow. This is a source review with regression tests, not a penetration test or a guarantee that no vulnerabilities exist.
 
-Checks performed:
+The checks covered credential patterns and suspicious high-entropy strings; process launches; file, archive and profile validation; DOM and external-link handling; app-scheme confinement; opened-file capabilities; navigation, downloads and permissions; local IPC; written-file permissions; dependency provenance and current advisories. [`SECURITY.md`](../SECURITY.md) describes the product threat model and existing protections.
 
-* searched the working tree and Git patches for credential/private-key patterns;
-* reviewed every process launch and the QML launcher for shell interpolation;
-* traced untrusted inputs through file-size checks, parsers, GeoJSON/property validation, DOM rendering, external-link handling and profile saving;
-* reviewed ZIP path/structure/expansion checks and aggregate workspace budgets;
-* compared the basemap list with both CSP copies and the native request allow-list;
-* reviewed app-scheme confinement, one-use file capabilities, navigation/download policy, permissions, IPC peer checks and written-file permissions;
-* verified vendored hashes and reviewed dependency pinning/automation;
-* ran the available lint and automated security/regression tests.
+## Findings and fixes
 
-The detailed product threat model and defence design remain in [`SECURITY.md`](../SECURITY.md).
+| ID | Severity | Finding | Resolution |
+|---|---|---|---|
+| SR-01 | Medium, conditional on unsafe local permissions | The native host checked only the top-level `core/` directory. A group/other-writable script or nested directory inside an otherwise trusted core could still supply executable app code. | The startup trust check now walks the served core tree, checking ownership and write permissions for files, hidden files and directories. Canonical paths prevent following links outside the served tree; visited paths bound internal symlink cycles. Native regression tests cover these cases. |
+| SR-02 | Low, availability | GeoJSON declaring British National Grid ran recursive GeometryCollection reprojection before the normal nesting guard. A 15,000-level input exhausted the JavaScript stack. | Reprojection now enforces the existing geometry-depth limit before descending. Tests cover hostile nesting and the accepted boundary, including altitude preservation. |
+| SR-03 | Low, audit coverage | The advisory inventory omitted `mgrs` and `wkt-parser`, which are embedded transitively through shpjs's proj4 bundle. Their advisories would not be queried by the scheduled check. | Added both to the package-wide advisory checks for embedded libraries without reliable exact version metadata. No runtime library was replaced. |
+| SR-04 | Low, data integrity | A truncated shapefile could be accepted as a partial layer because shpjs stopped after the last complete record. | Validate the declared file length/version and complete record spans before parsing. Loose-file and ZIP regressions cover truncated records, negative lengths and trailing partial headers. |
+| SR-05 | Low, data integrity | Inconsistent DBF field widths or a row count different from its shapefile could silently misread, drop or invent empty feature attributes. | Validate descriptor boundaries/terminator, row width against field widths, and equality of SHP/DBF record counts before calling shpjs. Regression tests cover each malformed layout and mismatched table size. |
+| SR-06 | Informational | No embedded secret or data-controlled shell command was found. | History and current-source findings are described below. |
+| SR-07 | Informational | Fresh online dependency checks found no published advisories for the checked packages. | npm audit, official-release comparisons and GitHub advisory queries completed successfully; scope and limitations are below. |
 
-## Findings summary
+The host fix deliberately refuses an installation whose served files can be modified by another local user. The parser fixes reject malformed or excessively nested inputs; valid data within the documented limits retains its behavior. Profile numeric defaults and other correctness changes in this PR are covered by regression tests but are not presented as security vulnerabilities.
 
-| ID | Severity | Area | Result |
-|---|---:|---|---|
-| SR-01 | Informational | Secrets | No embedded credential, private key or service API key was found in the current tree or reachable Git patches. Matches were documentation/test strings and the Actions-provided `github.token`. |
-| SR-02 | Informational | Process execution | No file-controlled shell command was found. Native launches use `QProcess` argument lists. The widget uses `execDetached([...])`; its only shell is the fixed installation probe `command -v omamap >/dev/null`. |
-| SR-03 | Informational | Input handling | Existing validation is unusually comprehensive: strict geometry/property validation, early tabular checks, archive consistency/CRC/path checks, file/dataset/workspace limits, XML declaration rejection and text-only rendering. Regression tests exercise hostile cases. |
-| SR-04 | Informational | Host boundary | Scheme paths are canonicalised beneath the trusted core, opened-file URLs use single-use random capabilities, requests and navigation are allow-listed, renderer permissions are denied, and local IPC checks peer ownership. No low-risk host fix was identified. |
-| SR-05 | Informational | Supply chain | npm development dependencies are exactly locked; GitHub Actions and the Arch container use immutable hashes/digests; browser libraries have committed hashes/licences and a weekly provenance/advisory workflow. Local hash tests passed. |
-| SR-06 | Low / residual | XML availability | KML/GPX's initial `DOMParser.parseFromString` is synchronous. Preflight limits bound input and reject entity declarations, but a pathological in-limit document can pause the UI until that call returns. This is documented rather than changed because eliminating it requires a different XML parser or architecture. |
-| SR-07 | Low / residual | Memory availability | Limits are admission estimates, not a hard process/GPU cap. Valid worst-case data can exceed comfortable memory on a small system, and a renderer restart loses unsaved work. Existing limits, cancellation and crash recovery reduce impact. |
-| SR-08 | Low / residual | Third-party code | Leaflet, shpjs/proj4, fflate, PapaParse, togeojson and Qt WebEngine process untrusted bytes. Pre/post-validation and Chromium sandboxing reduce exposure but cannot remove parser/engine vulnerabilities. Keep system Qt packages and vendored monitoring current. |
-| SR-09 | Review incomplete | Live advisories | The environment's network proxy returned HTTP 403 for the npm audit endpoint and npm registry, so current online advisory data could not be independently fetched during this pass. The lockfile's cached/offline audit reported zero known vulnerabilities, but that is not a substitute for a fresh query. The weekly `vendor-security.yml` workflow should provide the authoritative online result. |
+## Secrets and process execution
 
-## Low-risk fixes made
+Pattern scans of all 242 reachable blobs checked private-key markers, common GitHub/AWS/Google/Slack credential formats, credential assignments and URLs containing credentials. The only candidates were deliberate URL fixtures in four historical versions of `tests/security.cjs`. An additional entropy check over 222 non-vendor textual blobs and a credential-pattern check of commit messages found no candidates. The review also inspected current authentication references without displaying credential values.
 
-No new low-risk security defect was found that could be fixed without changing the documented trust model or undertaking a parser/host redesign. Existing mitigations and runtime behaviour were retained.
+This scope does **not** include unreachable objects, deleted remote refs, forks, GitHub issues/artifacts, or local credential stores. Pattern and entropy scans can miss unfamiliar secret formats. Keep GitHub secret scanning enabled; any future confirmed exposure requires revocation/rotation before considering history cleanup.
 
-The review added direct tests for previously uncovered thematic classification and geodesic measurement logic. Those tests reduce the chance that crafted or unusual valid values produce misleading legends or measurements, but are classified as correctness rather than security fixes.
+Native process launches use `QProcess` argument lists. The bar widget opens paths with `execDetached(["omamap", "--", path])`; its shell command is the fixed installation probe `command -v omamap >/dev/null`. File-controlled text is not interpolated into shell commands. Host-to-page values are serialized as JSON, and untrusted displayed values use text nodes or attribute values. The app accepts only credential-free HTTP(S) attribute links and opens them in the external browser.
 
-## Secrets review detail
+The basemap providers use public tile URLs; the app needs no service API secret. `GH_TOKEN` in the advisory workflow is supplied at runtime by GitHub Actions. The workflow grants only `contents: read` and does not persist checkout credentials.
 
-No production secret is required: the configured basemap providers use public tile URLs. `GH_TOKEN` appears only as the GitHub Actions job token supplied at runtime to the scheduled advisory query. Test strings include `/etc/passwd`, URL credentials and shell metacharacters specifically to prove that they are blocked or passed as a single argument; they are not credentials.
+## Dependency evidence
 
-Because regex scanning cannot prove that a high-entropy value is harmless, repository owners should still keep GitHub secret scanning enabled. If a real secret ever entered history, deleting it from the branch would not be sufficient: revoke/rotate it first, then consider history rewriting.
+The following fresh network checks succeeded on 2026-10-03:
 
-## Dependency review detail
+| Check | Result |
+|---|---|
+| `npm audit --json` | Zero reported vulnerabilities across 80 development dependencies. |
+| `node --test tests/vendor.test.cjs` | Both tests pass: committed SHA-256 pins match all six browser asset files and no additional unpinned vendor file is present. |
+| Official npm archives | All six files match the published releases for Leaflet 1.9.4, shpjs 6.2.0, fflate 0.8.3, PapaParse 5.4.1 and `@tmcw/togeojson` 5.1.2. The independent comparison also verified each downloaded archive against npm's integrity/shasum metadata. |
+| npm bulk advisory API | No findings for the five pinned runtime library versions. |
+| `python3 scripts/check-vendor-advisories.py` | Exit 0: official-release byte comparisons pass; GitHub reports zero advisories for the five pinned libraries and package-wide queries for `proj4`, `parsedbf`, `but-unzip`, `mgrs` and `wkt-parser`. |
 
-The shipped web runtime does not install npm packages. It uses the files under `core/vendor/`, checked by `core/vendor/SHA256SUMS` and `tests/vendor.test.cjs`. npm dependencies are development tooling (`eslint` and `playwright-core`) and are pinned by `package-lock.json`. The native runtime comes from the distribution's Qt packages, outside this repository's lockfile.
+The GitHub advisory endpoint initially returned a network-proxy HTTP 403. After the environment network configuration was updated, the official script was rerun and passed. There is no outstanding online-audit blocker from that initial failure.
 
-The repository already uses two complementary controls:
+The shipped browser runtime uses committed vendor files, not `node_modules`. npm's audit therefore cannot replace the separate vendor check. shpjs's archive does not publish a dependency lockfile and its bundled proj4 version is a placeholder; exact embedded versions remain unknown. Package-wide queries conservatively report any advisory for those packages, requiring a maintainer to assess applicability. A zero result is a snapshot of published advisories, not proof that the libraries are bug-free.
 
-1. every PR runs lint, Node/browser tests, the native build/tests and the hardened-host smoke suite in `.github/workflows/ci.yml`; and
-2. `.github/workflows/vendor-security.yml` checks the committed browser files against official npm release archives and queries GitHub advisories weekly.
+Qt WebEngine and other native libraries come from distribution packages. The native host was built and exercised with those packages during environment validation, but this pass did not independently match the distribution's Chromium/Qt patches against every upstream advisory. Keep the operating system and Qt packages updated.
 
-The second check needs network access and should be investigated immediately if its scheduled run fails or reports an advisory. Dependabot covers npm and Actions metadata, but updating a vendored browser file remains a deliberate manual operation requiring hashes, licences, regression tests and release-note review.
+Actions are pinned to commit hashes, the CI Arch image is pinned by digest, npm dependencies have a lockfile, and vendored files have hashes and licences. Dependabot covers npm and Actions; the weekly `vendor-security.yml` workflow handles vendor provenance and advisories. Investigate failures of that workflow rather than treating a failed query as an empty advisory result.
 
-## Owner decisions / follow-up
+## Remaining limitations and owner decisions
 
-1. **KML/GPX parser architecture:** decide whether the documented bounded main-thread pause is acceptable, or whether a future release should adopt a worker-compatible streaming XML parser. That would be a larger dependency and security-review decision, not a low-risk patch.
-2. **Resource envelope:** decide whether to offer a lower-memory mode or configurable limits for small systems. Lower defaults would reject files currently documented as supported; higher/configurable limits weaken the predictable availability boundary.
-3. **Online audit confirmation:** confirm that the scheduled vendored-dependency security workflow is green after this PR. The current development environment could not reach the registries.
+1. **XML responsiveness:** KML/GPX conversion yields between features, but the initial `DOMParser.parseFromString` call is synchronous. File-size and feature-count prechecks, including rejection of `DOCTYPE`/`ENTITY`, reduce exposure but do not strictly bound parsing time or DOM allocations. Decide whether a future worker-compatible streaming XML parser is worth the additional dependency and design review.
+2. **Memory envelope:** The 512 MiB workspace estimate is an admission budget, not a hard process/GPU cap. Large valid files can exceed comfortable memory on small systems; a renderer restart loses unsaved work. A lower-memory mode would change which inputs are accepted and should be a separate product decision.
+3. **Local installation trust:** Core permissions are checked at startup. They are not a race-proof guarantee against later filesystem replacement or permission changes. Keep installation/checkout parent directories under trusted control. `OMAMAP_CORE_DIR` deliberately remains a developer override; the threat model trusts the user's environment and processes running as that user.
+4. **Third-party and native code:** Continue vendor advisory monitoring and distribution updates. Updating vendored parsers requires provenance, hashes/licences and format/security regressions. The sandbox is disabled only for disposable container tests (CI runs as root); that configuration must not be copied into a normal desktop launch.
 
-## Conclusion
-
-No critical, high or medium severity issue was found. No secret or unsafe file-controlled shell execution was found. The important residual risks are availability at documented limits, synchronous XML DOM construction, third-party parser/engine defects and the need to confirm fresh online advisory results. These are already substantially mitigated and disclosed; the owner decisions above concern whether to invest in larger architectural changes.
+No critical issue was identified. The conditional local-code trust defect and the smaller validation/monitoring defects above have narrow fixes; the remaining items require ongoing maintenance or larger architectural decisions.

@@ -1,11 +1,12 @@
 "use strict";
 /* Parser and validation tests, run in Node against the same vendored
-   libraries the app ships. Usage: node --test tests/ */
+   libraries the app ships. Usage: npm test */
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const zlib = require("node:zlib");
+const vm = require("node:vm");
 
 const core = path.join(__dirname, "..", "core");
 globalThis.self = globalThis;
@@ -89,6 +90,37 @@ test("GeoJSON rejects bad geometry", () => {
   assert.throws(() => P.validateFeatureCollection({ type: "FeatureCollection", features: [] }), /no features/);
 });
 
+test("every supported geometry validates and contributes all positions to the budget", () => {
+  const ring = [[0, 0], [1, 0], [1, 1], [0, 0]];
+  const cases = [
+    [{ type: "Point", coordinates: [0, 0, 3, 4] }, 1],
+    [{ type: "MultiPoint", coordinates: [[0, 0], [1, 1]] }, 2],
+    [{ type: "LineString", coordinates: [[0, 0], [1, 1]] }, 2],
+    [{ type: "MultiLineString", coordinates: [[[0, 0], [1, 1]], [[2, 2], [3, 3]]] }, 4],
+    [{ type: "Polygon", coordinates: [ring, ring] }, 8],
+    [{ type: "MultiPolygon", coordinates: [[ring], [ring, ring]] }, 12],
+    [{ type: "GeometryCollection", geometries: [{ type: "Point", coordinates: [0, 0] }, { type: "Polygon", coordinates: [ring] }] }, 5]
+  ];
+  for (const [geometry, count] of cases) {
+    const fc = P.validateFeatureCollection(geometry);
+    assert.equal(fc.coordinateCount, count, geometry.type);
+    assert.deepEqual(fc.features[0].geometry, geometry);
+    assert.ok(fc.estimatedBytes >= count * 64);
+  }
+});
+
+test("empty multipart geometries and invalid positions cannot reach rendering", () => {
+  for (const type of ["MultiPoint", "LineString", "MultiLineString", "Polygon", "MultiPolygon"]) {
+    assert.throws(() => P.validateFeatureCollection({ type, coordinates: [] }), /requires at least/);
+  }
+  assert.throws(() => P.validateFeatureCollection({ type: "MultiLineString", coordinates: [[[0, 0]]] }), /at least two/);
+  assert.throws(() => P.validateFeatureCollection({ type: "MultiPolygon", coordinates: [[]] }), /at least one ring/);
+  assert.throws(() => P.validateFeatureCollection({ type: "GeometryCollection", geometries: [] }), /at least one geometry/);
+  for (const coordinates of [[0], [0, 0, 0, 0, 0], [NaN, 0], [0, Infinity], [0, -91], [-181, 0]]) {
+    assert.throws(() => P.validateFeatureCollection({ type: "Point", coordinates }), /numbers|bounds/);
+  }
+});
+
 test("prototype-pollution property names are rejected", () => {
   const evil = '{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{"__proto__":{"x":1}}}';
   assert.throws(() => P.jsonToGeoJSON(evil), /unsafe property/);
@@ -157,6 +189,21 @@ test("GeoJSON declaring EPSG:27700 is converted", async () => {
   assert.ok(metres(line[0], [-3.1998812, 55.9485944]) < 1);
   assert.ok(metres(line[1], [-4.2543527, 55.8625381]) < 1);
   assert.match(ds.warnings[0], /EPSG:27700/);
+});
+
+test("BNG GeometryCollections enforce the nesting limit before reprojection", () => {
+  const point = '{"type":"Point","coordinates":[325165,673490,42]}';
+  const collection = '{"type":"GeometryCollection","geometries":[';
+  const prefix = '{"type":"Feature","properties":{},"crs":{"properties":{"name":"EPSG:27700"}},"geometry":';
+  const valid = P.jsonToGeoJSON(prefix + collection.repeat(P.LIMITS.geometryDepth) + point + ']}'.repeat(P.LIMITS.geometryDepth) + '}');
+  let geometry = valid.features[0].geometry;
+  for (let i = 0; i < P.LIMITS.geometryDepth; i++) geometry = geometry.geometries[0];
+  assert.ok(metres(geometry.coordinates, [-3.1998812, 55.9485944]) < 1);
+  assert.equal(geometry.coordinates[2], 42);
+  assert.equal(valid.coordinateCount, 1);
+  // Construct the JSON directly so the test does not hit JSON.stringify's
+  // own stack limit before exercising the parser's hostile-input guard.
+  assert.throws(() => P.jsonToGeoJSON(prefix + collection.repeat(15000) + point + ']}'.repeat(15000) + '}'), /GeometryCollection nesting limit exceeded/);
 });
 
 test("zipped shapefile fixture loads one point", async () => {
@@ -248,6 +295,27 @@ test("profile style values are cleaned, and unsafe fields dropped", async () => 
   assert.equal(st.weight, 0.5);
   assert.equal(st.outline, "auto");
   assert.equal(st.byField, null);
+});
+
+test("missing profile numbers preserve defaults instead of becoming zero", async () => {
+  for (const value of [null, undefined, "", "  ", false, true, [], {}]) {
+    const p = await P.parseBytes("defaults.omamap", bytes(profileOf({
+      view: { lat: value, lng: -3.2, zoom: 11 },
+      datasets: [{ style: { fillOpacity: value, weight: value, radius: value }, geojson: JSON.parse(POINT_FC) }]
+    })));
+    assert.equal(p.view, null);
+    assert.equal(p.datasets[0].style.fillOpacity, null);
+    assert.equal(p.datasets[0].style.weight, null);
+    assert.equal(p.datasets[0].style.radius, null);
+  }
+  const p = await P.parseBytes("numbers.omamap", bytes(profileOf({
+    view: { lat: "0", lng: 0, zoom: "11" },
+    datasets: [{ style: { fillOpacity: 0, weight: "3", radius: "7" }, geojson: JSON.parse(POINT_FC) }]
+  })));
+  assert.deepEqual(p.view, { lat: 0, lng: 0, zoom: 11 });
+  assert.equal(p.datasets[0].style.fillOpacity, 0);
+  assert.equal(p.datasets[0].style.weight, 3);
+  assert.equal(p.datasets[0].style.radius, 7);
 });
 
 test("profile dataset warnings are kept, cleaned and capped", async () => {
@@ -415,6 +483,38 @@ test("a .shp of millions of empty records is refused before features are built",
   await assert.rejects(P.parseShapefileSet("junk", { shp: ab(Buffer.alloc(200)) }), /not a shapefile/);
 });
 
+test("truncated shapefiles are rejected instead of importing a partial layer", async () => {
+  const complete = makeShp([[-3.2, 55.9], [-3.9, 56.1]]);
+  const truncated = Buffer.from(complete.subarray(0, complete.length - 10));
+  await assert.rejects(P.parseShapefileSet("truncated", { shp: ab(truncated) }), /\.shp.*truncated|\.shp.*inconsistent/);
+  // Even a forged header matching the short file must not hide a partial
+  // record, negative record length, or trailing partial record header.
+  truncated.writeInt32BE(truncated.length / 2, 24);
+  await assert.rejects(P.parseShapefileSet("truncated", { shp: ab(truncated) }), /\.shp.*truncated/);
+  const negative = Buffer.from(complete);
+  negative.writeInt32BE(-1, 132);
+  await assert.rejects(P.parseShapefileSet("negative", { shp: ab(negative) }), /\.shp.*record/);
+  const trailing = Buffer.concat([complete, Buffer.alloc(2)]);
+  trailing.writeInt32BE(trailing.length / 2, 24);
+  await assert.rejects(P.parseShapefileSet("trailing", { shp: ab(trailing) }), /\.shp.*truncated/);
+  await assert.rejects(P.parseBytes("truncated.zip", makeZip({ "x.shp": truncated })), /\.shp.*truncated/);
+});
+
+
+test("shapefile attributes must match the geometry count and DBF record layout", async () => {
+  const one = makeShp([[-3.2, 55.9]]), two = makeShp([[-3.2, 55.9], [-3.9, 56.1]]);
+  await assert.rejects(P.parseShapefileSet("extra", { shp: ab(one), dbf: ab(makeDbf(["A", "B"])) }), /record counts.*disagree/);
+  await assert.rejects(P.parseShapefileSet("missing", { shp: ab(two), dbf: ab(makeDbf(["A"])) }), /record counts.*disagree/);
+  const narrow = makeDbf(["First", "Second"]);
+  narrow.writeUInt16LE(1, 10);
+  await assert.rejects(P.parseShapefileSet("overlap", { shp: ab(two), dbf: ab(narrow) }), /\.dbf.*inconsistent/);
+  const noTerminator = makeDbf(["A"]);
+  noTerminator[64] = 0;
+  await assert.rejects(P.parseShapefileSet("header", { shp: ab(one), dbf: ab(noTerminator) }), /\.dbf.*inconsistent/);
+  const [valid] = await P.parseShapefileSet("complete", { shp: ab(two), dbf: ab(makeDbf(["First", "Second"])) });
+  assert.deepEqual(valid.geojson.features.map((f) => f.properties.name), ["First", "Second"]);
+});
+
 test("a CSV with more than 10 million cells is refused before features are built", () => {
   // 100 MiB of one-character cells needed about 3 GiB once built.
   const header = ["lat", "lon"].concat(Array.from({ length: 498 }, (_, i) => "c" + i)).join(",");
@@ -513,4 +613,31 @@ test("KML and GPX inside a ZIP or KMZ come back for the page to convert", async 
   const two = [{ xml: { text: "", ext: "kml" } }, { xml: { text: "", ext: "kml" } }];
   const run = () => ({ type: "FeatureCollection", features: new Array(600000).fill(0) });
   await assert.rejects(P.resolveXmlLayers(two, run), /together exceed/);
+});
+
+test("parse worker dispatches jobs, reports rejected inputs and remains usable", async () => {
+  const replies = [], imports = [];
+  const context = vm.createContext({
+    OmaParse: P,
+    importScripts: (...names) => imports.push(...names),
+    self: { postMessage: (message) => replies.push(message) }
+  });
+  vm.runInContext(fs.readFileSync(path.join(core, "parse-worker.js"), "utf8"), context);
+  assert.deepEqual(imports, ["vendor/fflate.js", "vendor/shp.js", "vendor/papaparse.min.js", "parse.js"]);
+  await context.self.onmessage({ data: { id: 1, kind: "file", name: "invalid.geojson", buffer: bytes("{") } });
+  assert.equal(replies[0].id, 1);
+  assert.equal(replies[0].ok, false);
+  assert.match(replies[0].error, /not valid JSON/);
+  await context.self.onmessage({ data: { id: 2, kind: "unsupported" } });
+  assert.equal(replies[1].id, 2);
+  assert.equal(replies[1].ok, false);
+  assert.equal(replies[1].error, "Unknown parse job.");
+  await context.self.onmessage({ data: { id: 3, kind: "file", name: "valid.geojson", buffer: bytes(POINT_FC) } });
+  assert.equal(replies[2].id, 3);
+  assert.equal(replies[2].ok, true);
+  assert.equal(replies[2].datasets[0].geojson.features[0].properties.name, "Edinburgh");
+  await context.self.onmessage({ data: { id: 4, kind: "shapefile-set", name: "sites", parts: { shp: ab(makeShp([[-3.2, 55.9]])) } } });
+  assert.equal(replies[3].id, 4);
+  assert.equal(replies[3].ok, true);
+  assert.deepEqual(replies[3].datasets[0].geojson.features[0].geometry.coordinates, [-3.2, 55.9]);
 });

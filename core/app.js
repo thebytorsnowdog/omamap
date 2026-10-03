@@ -244,13 +244,13 @@ function applyDatasetStyle(ds) {
 function findDs(id) { return STATE.datasets.find(function (d) { return d.id === id; }); }
 
 function geometrySummary(geojson) {
-  const set = {};
-  geojson.features.forEach(function (f) {
-    const g = f.geometry;
-    if (g.type === "GeometryCollection") g.geometries.forEach(function (gg) { set[gg.type] = true; });
-    else set[g.type] = true;
-  });
-  return Object.keys(set);
+  const types = new Set();
+  const visit = function (g) {
+    if (g.type === "GeometryCollection") g.geometries.forEach(visit);
+    else types.add(g.type);
+  };
+  geojson.features.forEach(function (f) { visit(f.geometry); });
+  return Array.from(types);
 }
 
 // Drive a generator in short slices so painting, input and Cancel can run
@@ -1181,13 +1181,23 @@ function wireDragDrop() {
 
 function isTyping(e) {
   const t = e.target;
-  return t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+  return t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
 }
 
 function wireKeys() {
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
-      if (isTyping(e)) { e.target.value = ""; e.target.blur(); renderAttributes(); return; }
+      if (isTyping(e)) {
+        const target = e.target;
+        if (target.tagName === "TEXTAREA" || (target.tagName === "INPUT" && /^(text|search)$/.test(target.type))) {
+          e.preventDefault();
+          target.value = "";
+          // Keep the table's debounced query and the inspector filter in sync.
+          target.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        target.blur();
+        return;
+      }
       clearSelection(); return;
     }
     if (isTyping(e) || e.ctrlKey || e.altKey || e.metaKey) {

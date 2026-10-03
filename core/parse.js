@@ -333,16 +333,19 @@
 
   function reprojectGeoJsonBng(data) {
     const counter = { count: 0 };
-    const geom = function (g) {
+    const geom = function (g, depth) {
       if (!g || typeof g !== "object") return g;
-      if (g.type === "GeometryCollection" && Array.isArray(g.geometries)) return Object.assign({}, g, { geometries: g.geometries.map(geom) });
+      if (depth > LIMITS.geometryDepth) throw new Error("GeometryCollection nesting limit exceeded.");
+      if (g.type === "GeometryCollection" && Array.isArray(g.geometries)) return Object.assign({}, g, {
+        geometries: g.geometries.map(function (child) { return geom(child, depth + 1); })
+      });
       return Object.assign({}, g, { coordinates: reprojectBng(g.coordinates, 0, counter) });
     };
     if (data.type === "FeatureCollection" && Array.isArray(data.features)) {
-      return Object.assign({}, data, { features: data.features.map(function (f) { return f && typeof f === "object" ? Object.assign({}, f, { geometry: geom(f.geometry) }) : f; }) });
+      return Object.assign({}, data, { features: data.features.map(function (f) { return f && typeof f === "object" ? Object.assign({}, f, { geometry: geom(f.geometry, 0) }) : f; }) });
     }
-    if (data.type === "Feature") return Object.assign({}, data, { geometry: geom(data.geometry) });
-    return geom(data);
+    if (data.type === "Feature") return Object.assign({}, data, { geometry: geom(data.geometry, 0) });
+    return geom(data, 0);
   }
 
   function parseJson(text) {
@@ -708,10 +711,15 @@
   function checkShapefile(shpBytes, dbfBytes) {
     const shp = new DataView(shpBytes.buffer, shpBytes.byteOffset, shpBytes.byteLength);
     if (shpBytes.byteLength < 100 || shp.getInt32(0) !== 9994) throw new Error("The .shp file is not a shapefile.");
+    if (shp.getInt32(24) * 2 !== shpBytes.byteLength || shp.getInt32(28, true) !== 1000) throw new Error("The .shp file is truncated or its header is inconsistent.");
     let records = 0;
-    for (let offset = 100; offset + 8 <= shpBytes.byteLength;) {
+    for (let offset = 100; offset < shpBytes.byteLength;) {
+      if (offset + 8 > shpBytes.byteLength) throw new Error("The .shp file has a truncated record header.");
       const length = shp.getInt32(offset + 4) * 2;   // big-endian, in 16-bit words
-      if (length < 0 || offset + 8 + length > shpBytes.byteLength) break;   // where shpjs stops too
+      // shpjs silently stops at a truncated record and returns the preceding
+      // features. Reject the file instead of presenting an incomplete layer.
+      if (length < 0 || (length > 0 && length < 4)) throw new Error("The .shp file has an invalid record length.");
+      if (offset + 8 + length > shpBytes.byteLength) throw new Error("The .shp file has a truncated record.");
       if (++records > LIMITS.features) throw new Error("Shapefile has more than " + LIMITS.features.toLocaleString() + " records.");
       offset += 8 + length;
     }
@@ -719,15 +727,15 @@
     const dbf = new DataView(dbfBytes.buffer, dbfBytes.byteOffset, dbfBytes.byteLength);
     if (dbfBytes.byteLength < 33) throw new Error("The .dbf file is truncated.");
     const rows = dbf.getUint32(4, true), headerLength = dbf.getUint16(8, true), rowLength = dbf.getUint16(10, true);
-    let fields = 0;
-    for (let offset = 32; offset < headerLength - 1 && offset + 32 < dbfBytes.byteLength; offset += 32) {
-      fields++;
-      if (dbf.getUint8(offset + 32) === 13) break;
-    }
+    if (headerLength < 33 || headerLength > dbfBytes.byteLength || (headerLength - 33) % 32 !== 0 || dbf.getUint8(headerLength - 1) !== 13) throw new Error("The .dbf file header is inconsistent.");
+    const fields = (headerLength - 33) / 32;
     if (rows > LIMITS.features) throw new Error("The .dbf file has more than " + LIMITS.features.toLocaleString() + " records.");
     if (fields > LIMITS.propertiesPerFeature) throw new Error("The .dbf file has more than " + LIMITS.propertiesPerFeature + " fields.");
     if (rows * fields > LIMITS.cells) throw new Error("The .dbf file has more than " + LIMITS.cells.toLocaleString() + " values.");
-    if (!rowLength || headerLength + rows * rowLength > dbfBytes.byteLength) throw new Error("The .dbf file is truncated or its header is inconsistent.");
+    let expectedRowLength = 1; // the deletion flag precedes every record
+    for (let offset = 32; offset < headerLength - 1; offset += 32) expectedRowLength += dbf.getUint8(offset + 16);
+    if (rowLength !== expectedRowLength || headerLength + rows * rowLength > dbfBytes.byteLength) throw new Error("The .dbf file is truncated or its header is inconsistent.");
+    if (rows !== records) throw new Error("The .shp and .dbf record counts disagree.");
   }
 
   async function shapefileParts(parts) {
@@ -803,7 +811,13 @@
   }
 
   function cleanHex(v) { return typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : null; }
-  function cleanNum(v, lo, hi, fallback) { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback; }
+  function cleanNum(v, lo, hi, fallback) {
+    // Null, blanks and booleans are not numeric settings. In particular,
+    // null style values mean "use the default", not zero opacity/size.
+    if (typeof v !== "number" && (typeof v !== "string" || !v.trim())) return fallback;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback;
+  }
   function cleanText(v, max) { return typeof v === "string" ? v.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, max) : ""; }
 
   // Notes saved with a dataset (assumed CRS, skipped rows): shown as text only.
@@ -863,8 +877,9 @@
     });
     let view = null;
     const v = wimp ? (data.map && Array.isArray(data.map.center) ? { lat: data.map.center[0], lng: data.map.center[1], zoom: data.map.zoom } : null) : data.view;
-    if (v && Number.isFinite(Number(v.lat)) && Number.isFinite(Number(v.lng)) && Number.isFinite(Number(v.zoom))) {
-      view = { lat: cleanNum(v.lat, -85, 85, 0), lng: cleanNum(v.lng, -180, 180, 0), zoom: cleanNum(v.zoom, 2, 22, 6) };
+    if (v) {
+      const lat = cleanNum(v.lat, -85, 85, null), lng = cleanNum(v.lng, -180, 180, null), zoom = cleanNum(v.zoom, 2, 22, null);
+      if (lat !== null && lng !== null && zoom !== null) view = { lat: lat, lng: lng, zoom: zoom };
     }
     const basemapRaw = wimp ? (data.map && data.map.basemap) : data.basemap;
     const basemap = typeof basemapRaw === "string" && /^[a-z]{1,20}$/.test(basemapRaw) ? basemapRaw : null;

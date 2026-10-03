@@ -20,6 +20,7 @@ add_executable(omamap
   recent.cpp recent.h
   scheme.cpp scheme.h
   theme.cpp theme.h
+  trusted_core.cpp trusted_core.h
   window.cpp window.h
 )
 
@@ -45,6 +46,10 @@ if(BUILD_TESTING)
   target_include_directories(recent-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(recent-test PRIVATE Qt6::Core)
   add_test(NAME recent COMMAND recent-test)
+  add_executable(trusted-core-test ../tests/trusted-core.cpp trusted_core.cpp)
+  target_include_directories(trusted-core-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(trusted-core-test PRIVATE Qt6::Core)
+  add_test(NAME trusted-core COMMAND trusted-core-test)
 endif()
 
 install(TARGETS omamap RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

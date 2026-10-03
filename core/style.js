@@ -42,7 +42,10 @@ function defaultStyle(ds) {
 function normalizeValue(v) {
   if (v === null || v === undefined) return "";
   if (typeof v === "object") return JSON.stringify(v);
-  return String(v).trim().toLowerCase().replace(/[_\-\s]+/g, " ");
+  const text = String(v).trim().toLowerCase();
+  // Hyphens in semantic labels are separators; signs and exponents in
+  // numeric categories must survive so sorting and colour ramps stay numeric.
+  return numericValue(v) === null ? text.replace(/[_\-\s]+/g, " ") : text;
 }
 
 function numericValue(v) {
@@ -308,7 +311,7 @@ function selectBox(options, value, onChange) {
    the main thread is left free for at least as long as that restyle and its
    redraw took, so input and the slider itself keep painting. The latest
    value is always applied. */
-const Restyle = { pending: new Set(), frame: 0, timer: 0, freeUntil: 0, waiters: [] };
+const Restyle = { pending: new Set(), frame: 0, timer: 0, painting: 0, freeUntil: 0, waiters: [] };
 
 function scheduleRestyle(ds) {
   Restyle.pending.add(ds);
@@ -320,6 +323,7 @@ function scheduleRestyle(ds) {
 
 function runRestyles() {
   Restyle.frame = 0;
+  Restyle.painting++;
   const started = performance.now();
   const list = Array.from(Restyle.pending);
   Restyle.pending.clear();
@@ -327,16 +331,17 @@ function runRestyles() {
   highlightSelection(); renderLegend(); refreshSwatches();
   // Measure through the next frame, which includes the canvas redraw.
   requestAnimationFrame(function () {
+    Restyle.painting--;
     const now = performance.now();
     Restyle.freeUntil = now + Math.min(400, now - started);
     if (Restyle.pending.size) scheduleRestyle(Restyle.pending.values().next().value);
-    else if (!Restyle.timer && !Restyle.frame) Restyle.waiters.splice(0).forEach(function (resolve) { resolve(); });
+    else if (!Restyle.timer && !Restyle.frame && !Restyle.painting) Restyle.waiters.splice(0).forEach(function (resolve) { resolve(); });
   });
 }
 
 // Resolves once every requested restyle has been applied and painted.
 function restyleIdle() {
-  if (!Restyle.pending.size && !Restyle.frame && !Restyle.timer) return Promise.resolve();
+  if (!Restyle.pending.size && !Restyle.frame && !Restyle.timer && !Restyle.painting) return Promise.resolve();
   return new Promise(function (resolve) { Restyle.waiters.push(resolve); });
 }
 

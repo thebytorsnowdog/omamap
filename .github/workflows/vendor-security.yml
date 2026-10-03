@@ -1,5 +1,11 @@
 name: Vendored dependency security
 on:
+  pull_request:
+    paths:
+      - core/vendor/**
+      - packaging/vendor-dependencies.json
+      - scripts/check-vendor-advisories.py
+      - .github/workflows/vendor-security.yml
   schedule:
     - cron: '23 8 * * 1'
   workflow_dispatch:

@@ -17,6 +17,7 @@ const Table = {
   inView: false,
   columns: [],        // [{ field, width }]
   selected: -1,       // feature index
+  pendingReveal: false,
   frame: 0,
   revision: 0,
   rows: new Map(),    // drawn row elements by position in `order`
@@ -78,6 +79,7 @@ const Table = {
     this.last = ds;
     this.sort = null;
     this.selected = -1;
+    this.pendingReveal = false;
     this.query = "";
     el("tp-search").value = "";
     el("tp-scroll").scrollTop = 0;
@@ -248,7 +250,8 @@ const Table = {
       : order.length.toLocaleString() + " of " + plural(ds.features.length, "row");
     el("tp-body").style.height = (order.length * ROW_HEIGHT) + "px";
     el("tp-body").style.width = el("tp-header").scrollWidth + "px";
-    this.render();
+    if (this.pendingReveal) this.reveal(this.selected);
+    else this.render();
   },
 
   render: function () {
@@ -360,6 +363,9 @@ const Table = {
   // Highlight and scroll to a feature's row (after a map selection).
   reveal: function (index) {
     this.selected = index;
+    // Opening a large table can yield before its first order is available.
+    // Keep the request until filtering completes so the selected row is visible.
+    this.pendingReveal = !this.order;
     const pos = this.order ? this.order.indexOf(index) : -1;
     if (pos >= 0) {
       const scroll = el("tp-scroll");

@@ -6,5 +6,5 @@
     {"package":"papaparse","version":"5.4.1","files":{"papaparse.min.js":"package/papaparse.min.js"}},
     {"package":"@tmcw/togeojson","version":"5.1.2","files":{"togeojson.umd.js":"package/dist/togeojson.umd.js"}}
   ],
-  "bundledWithoutExactVersion": ["proj4", "parsedbf", "but-unzip"]
+  "bundledWithoutExactVersion": ["proj4", "parsedbf", "but-unzip", "mgrs", "wkt-parser"]
 }

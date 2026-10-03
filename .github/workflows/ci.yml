@@ -10,8 +10,24 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  unit:
+    name: JavaScript checks (Node 24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run lint
+      - run: npm test
   checks:
     name: OmaMap checks
+    needs: unit
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     container:
@@ -34,8 +50,6 @@ jobs:
       - name: Trust the checked-out workspace in this disposable container
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - run: npm ci --ignore-scripts
-      - run: npm run lint
-      - run: npm test
       - run: npm run test:browser
       - run: cmake -S host -B build -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build --parallel 2
@@ -45,3 +59,13 @@ jobs:
         env:
           QT_QPA_PLATFORM: xcb
           LIBGL_ALWAYS_SOFTWARE: '1'
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: integration-failure-diagnostics
+          path: |
+            tests/output/
+            build/Testing/Temporary/
+          retention-days: 7
+          if-no-files-found: ignore
