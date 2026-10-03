@@ -218,8 +218,14 @@ const FastPoints = L.Layer.extend({
     ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
     ctx.setTransform(dpr, 0, 0, dpr, -b.min.x * dpr, -b.min.y * dpr);
 
-    // Group visible points by style, preserving draw order of first appearance.
-    const groups = new Map();
+    // Batch consecutive styles only: global grouping would draw red/blue/red
+    // as red/red/blue, disagreeing with WebGL and feature hit-test order.
+    let group = null;
+    const flush = function () {
+      if (!group) return;
+      if (group.xs.length > 30) stamp(ctx, group.style, group.xs, group.ys, dpr);
+      else paint(ctx, group.style, group.xs, group.ys);
+    };
     const xy = this._xy0, s = this._scale, ox = this._origin.x, oy = this._origin.y;
     const minX = b.min.x - 20, minY = b.min.y - 20, maxX = b.max.x + 20, maxY = b.max.y + 20;
     const pts = this._points;
@@ -228,14 +234,13 @@ const FastPoints = L.Layer.extend({
       if (x < minX || x > maxX || y < minY || y > maxY) continue;
       const pt = pts[i];
       if (pt === this._front) continue;
-      let g = groups.get(pt._key);
-      if (!g) { g = { style: pt.options, xs: [], ys: [] }; groups.set(pt._key, g); }
-      g.xs.push(x); g.ys.push(y);
+      if (!group || group.key !== pt._key) {
+        flush();
+        group = { key: pt._key, style: pt.options, xs: [], ys: [] };
+      }
+      group.xs.push(x); group.ys.push(y);
     }
-    groups.forEach(function (g) {
-      if (g.xs.length > 30) stamp(ctx, g.style, g.xs, g.ys, dpr);
-      else paint(ctx, g.style, g.xs, g.ys);
-    });
+    flush();
     if (this._front && this._front._group === this) {
       const f = this._front, slot = f._slot;
       paint(ctx, f.options, [xy[2 * slot] * s - ox], [xy[2 * slot + 1] * s - oy]);
