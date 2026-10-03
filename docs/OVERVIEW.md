@@ -70,7 +70,7 @@ cmake --build build --parallel 2
 ./build/omamap --new-window path/to/data.geojson
 ```
 
-A developer binary located in its configured build directory automatically serves `core/` from this checkout, regardless of the shell's working directory. Distribution builds should pass `-DOMAMAP_DEV_CORE=OFF`; the provided `packaging/arch/PKGBUILD` does this. Use the existing checkout for cloud tasks: each task already has an isolated environment, so a separate Git worktree is unnecessary unless explicitly requested.
+A developer binary located in its configured build directory automatically serves `core/` from this checkout, regardless of the shell's working directory. Distribution builds should pass `-DOMAMAP_DEV_CORE=OFF`; the provided `packaging/arch/PKGBUILD` does this.
 
 Run the desktop app as a normal user. It needs a working Wayland or X11 session and Qt WebEngine's graphics/runtime dependencies. Two build jobs are a conservative default for smaller machines; increase parallelism when memory permits. The build compiles the small host against system Qt; it does not compile Chromium or bundle JavaScript.
 
