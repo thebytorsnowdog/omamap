@@ -803,7 +803,13 @@
   }
 
   function cleanHex(v) { return typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : null; }
-  function cleanNum(v, lo, hi, fallback) { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback; }
+  function cleanNum(v, lo, hi, fallback) {
+    // Null, blanks and booleans are not numeric settings. In particular,
+    // null style values mean "use the default", not zero opacity/size.
+    if (typeof v !== "number" && (typeof v !== "string" || !v.trim())) return fallback;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback;
+  }
   function cleanText(v, max) { return typeof v === "string" ? v.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, max) : ""; }
 
   // Notes saved with a dataset (assumed CRS, skipped rows): shown as text only.
@@ -863,8 +869,9 @@
     });
     let view = null;
     const v = wimp ? (data.map && Array.isArray(data.map.center) ? { lat: data.map.center[0], lng: data.map.center[1], zoom: data.map.zoom } : null) : data.view;
-    if (v && Number.isFinite(Number(v.lat)) && Number.isFinite(Number(v.lng)) && Number.isFinite(Number(v.zoom))) {
-      view = { lat: cleanNum(v.lat, -85, 85, 0), lng: cleanNum(v.lng, -180, 180, 0), zoom: cleanNum(v.zoom, 2, 22, 6) };
+    if (v) {
+      const lat = cleanNum(v.lat, -85, 85, null), lng = cleanNum(v.lng, -180, 180, null), zoom = cleanNum(v.zoom, 2, 22, null);
+      if (lat !== null && lng !== null && zoom !== null) view = { lat: lat, lng: lng, zoom: zoom };
     }
     const basemapRaw = wimp ? (data.map && data.map.basemap) : data.basemap;
     const basemap = typeof basemapRaw === "string" && /^[a-z]{1,20}$/.test(basemapRaw) ? basemapRaw : null;

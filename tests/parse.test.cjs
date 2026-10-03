@@ -250,6 +250,27 @@ test("profile style values are cleaned, and unsafe fields dropped", async () => 
   assert.equal(st.byField, null);
 });
 
+test("missing profile numbers preserve defaults instead of becoming zero", async () => {
+  for (const value of [null, undefined, "", "  ", false, true, [], {}]) {
+    const p = await P.parseBytes("defaults.omamap", bytes(profileOf({
+      view: { lat: value, lng: -3.2, zoom: 11 },
+      datasets: [{ style: { fillOpacity: value, weight: value, radius: value }, geojson: JSON.parse(POINT_FC) }]
+    })));
+    assert.equal(p.view, null);
+    assert.equal(p.datasets[0].style.fillOpacity, null);
+    assert.equal(p.datasets[0].style.weight, null);
+    assert.equal(p.datasets[0].style.radius, null);
+  }
+  const p = await P.parseBytes("numbers.omamap", bytes(profileOf({
+    view: { lat: "0", lng: 0, zoom: "11" },
+    datasets: [{ style: { fillOpacity: 0, weight: "3", radius: "7" }, geojson: JSON.parse(POINT_FC) }]
+  })));
+  assert.deepEqual(p.view, { lat: 0, lng: 0, zoom: 11 });
+  assert.equal(p.datasets[0].style.fillOpacity, 0);
+  assert.equal(p.datasets[0].style.weight, 3);
+  assert.equal(p.datasets[0].style.radius, 7);
+});
+
 test("profile dataset warnings are kept, cleaned and capped", async () => {
   const many = Array.from({ length: 30 }, (_, i) => "note " + i);
   const p = await P.parseBytes("w.omamap", bytes(profileOf({ datasets: [
