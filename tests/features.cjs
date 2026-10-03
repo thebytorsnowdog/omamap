@@ -65,7 +65,12 @@ function fixtures(dir) {
     const o = ds.layers[i].options;
     return { fillColor: o.fillColor, color: o.color, fillOpacity: o.fillOpacity, weight: o.weight, radius: o.radius };
   }, [dsName, index]);
-  const settle = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const settle = () => page.evaluate(async () => {
+    await restyleIdle();
+    await Table.pending;
+    // Both renderers and the virtual table schedule their paint in a frame.
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  });
   const setView = async (lat, lng, zoom) => {
     await page.waitForFunction(() => !STATE.map._animatingZoom);
     await page.evaluate(([la, ln, z]) => new Promise((resolve) => {
@@ -330,12 +335,15 @@ function fixtures(dir) {
   });
 
   await check("opening a profile over open datasets asks first", async () => {
-    let asked = null;
-    page.once("dialog", (d) => { asked = d.message(); d.dismiss(); });
+    const dialog = page.waitForEvent("dialog").then(async (d) => {
+      const message = d.message();
+      await d.dismiss();
+      return message;
+    });
     await page.setInputFiles("#file-input", path.join(OUT, "roundtrip.omamap"));
-    await page.waitForFunction(() => document.getElementById("loading").hidden);
-    await page.waitForTimeout(200);
-    assert.match(asked || "", /replaces the 2 datasets/);
+    const asked = await dialog;
+    await page.evaluate(() => loadQueue);
+    assert.match(asked, /replaces the 2 datasets/);
     assert.equal(await page.evaluate(() => STATE.datasets.length), 2);
   });
 
@@ -383,9 +391,19 @@ function fixtures(dir) {
 
   await check("Cancel stops a slow load and the next load works", async () => {
     await page.evaluate(() => { clearAll(); document.querySelectorAll(".toast").forEach((t) => t.remove()); });
-    const big = await makeFile("slow.geojson", 200000), next = await makeFile("next.geojson", 3);
+    const big = await makeFile("slow.geojson", 20), next = await makeFile("next.geojson", 3);
+    await page.evaluate(() => {
+      // Hold delivery to the worker so the Cancel click always sees an
+      // in-flight parse job, even on a machine that parses very quickly.
+      const worker = Parser.worker, postMessage = worker.postMessage;
+      window.__heldParse = false;
+      worker.postMessage = function () {
+        worker.postMessage = postMessage;
+        window.__heldParse = true;
+      };
+    });
     const loading = page.evaluate((big) => handleFiles([big]), big);
-    await page.waitForSelector("#loading:not([hidden])");
+    await page.waitForFunction(() => window.__heldParse && Parser.jobs.size === 1 && !document.getElementById("loading").hidden);
     await page.click("#loading-cancel");
     await loading;
     assert.equal(await page.locator("#loading").isHidden(), true);
@@ -406,20 +424,33 @@ function fixtures(dir) {
         datasets: [{ name: "p1", geojson: pts(60000, 1) }, { name: "p2", geojson: pts(60000, 2) }, { name: "p3", geojson: pts(60000, 3) }] };
       const parsed = await OmaParse.parseBytes("w.omamap", new TextEncoder().encode(JSON.stringify(profile)).buffer);
       cancelledLoad = false;
-      const restoring = restoreProfile(parsed);
-      setTimeout(() => { cancelledLoad = true; }, 30);
-      let error = null;
-      try { await restoring; } catch (e) { error = e instanceof LoadCancelled ? "cancelled" : e.message; }
-      cancelledLoad = false;
+      const prepare = window.prepareDataset;
+      let error = null, boundary = null;
+      window.prepareDataset = function* (saved, staged) {
+        const job = prepare(saved, staged);
+        try {
+          if (saved.name === "p2") {
+            const step = job.next();
+            boundary = { staged: staged.length, inProgress: !step.done };
+            cancelledLoad = true;
+            yield step.value;
+          }
+          return yield* job;
+        } finally { job.return(); }
+      };
+      try { await restoreProfile(parsed); }
+      catch (e) { error = e instanceof LoadCancelled ? "cancelled" : e.message; }
+      finally { window.prepareDataset = prepare; cancelledLoad = false; }
       const kept = STATE.datasets.map((d) => d.name);
       const onMap = STATE.datasets.every((d) => STATE.map.hasLayer(d.layer));
       const pointLayers = Object.values(STATE.map._layers).filter((l) => l instanceof FastPoints).length;
       const after = STATE.map.getCenter();
       // A complete restore still works afterwards.
       await restoreProfile(parsed);
-      return { error, kept, onMap, pointLayers, moved: before.distanceTo(after) > 1, restored: STATE.datasets.map((d) => d.name) };
+      return { error, boundary, kept, onMap, pointLayers, moved: before.distanceTo(after) > 1, restored: STATE.datasets.map((d) => d.name) };
     });
     assert.equal(r.error, "cancelled");
+    assert.deepEqual(r.boundary, { staged: 1, inProgress: true }, "cancel part-way through the second staged dataset");
     assert.deepEqual(r.kept, ["keep A", "keep B"]);
     assert.equal(r.onMap, true);
     assert.equal(r.pointLayers, 2, "no half-restored layers remain on the map");
@@ -442,25 +473,34 @@ function fixtures(dir) {
     assert.equal(r.errors, 0);
   });
 
-  await check("a large KML converts in slices and Cancel stops it", async () => {
+  await check("a large KML converts in slices and Cancel closes the conversion iterator", async () => {
     await page.evaluate(() => { clearAll(); document.querySelectorAll(".toast").forEach((t) => t.remove()); });
     const r = await page.evaluate(async () => {
       let kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>';
       for (let i = 0; i < 40000; i++) kml += "<Placemark><name>P" + i + "</name><Point><coordinates>" + (-4 + (i % 200) * 0.01) + "," + (55 + Math.floor(i / 200) * 0.005) + "</coordinates></Point></Placemark>";
       kml += "</Document></kml>";
-      let frames = 0, counting = true;
-      const tick = () => { frames++; if (counting) requestAnimationFrame(tick); };
-      requestAnimationFrame(tick);
-      const loading = handleFiles([new File([kml], "big.kml")]);
-      await new Promise((res) => setTimeout(res, 150));
-      cancelledLoad = true;
-      await loading;
-      counting = false;
-      return { frames, datasets: STATE.datasets.length, warn: Array.from(document.querySelectorAll(".toast.warn")).map((t) => t.textContent).join(" ") };
+      const convert = OmaParse.xmlToGeoJSONSteps;
+      let slices = 0, closed = false;
+      OmaParse.xmlToGeoJSONSteps = function* (...args) {
+        const job = convert(...args);
+        try {
+          let step;
+          while (!(step = job.next()).done) {
+            // Cancel at a real conversion boundary, after parsing has begun.
+            if (++slices === 3) document.getElementById("loading-cancel").click();
+            yield step.value;
+          }
+          return step.value;
+        } finally { job.return(); closed = true; }
+      };
+      try { await handleFiles([new File([kml], "big.kml")]); }
+      finally { OmaParse.xmlToGeoJSONSteps = convert; }
+      return { slices, closed, datasets: STATE.datasets.length, warn: Array.from(document.querySelectorAll(".toast.warn")).map((t) => t.textContent).join(" ") };
     });
     assert.equal(r.datasets, 0);
     assert.match(r.warn, /cancelled/i);
-    assert.ok(r.frames >= 2, "the page kept painting while the KML converted (" + r.frames + " frames)");
+    assert.equal(r.slices, 3, "conversion stops at the next slice after Cancel");
+    assert.equal(r.closed, true, "the cancelled conversion iterator is closed");
   });
 
   await check("a wide table draws only the rows and columns in view, and keeps rows while scrolling", async () => {
@@ -714,9 +754,9 @@ function fixtures(dir) {
       // A feature just inside the right edge, where the panel will sit.
       const size = STATE.map.getSize();
       const target = ds.layers.findIndex((l) => { const b = l.getBounds(); const p = STATE.map.latLngToContainerPoint(b.getCenter()); return p.x > size.x - 250 && p.x < size.x - 60 && p.y > 100 && p.y < size.y - 100; });
-      if (target < 0) { STATE.map.panBy([0, 0]); }
-      Table.open(ds); Table.choose(target, false);
-      await new Promise((res) => setTimeout(res, 400));
+      if (target < 0) throw new Error("No feature near the right edge");
+      Table.open(ds);
+      await new Promise((resolve) => { STATE.map.once("moveend", resolve); Table.choose(target, false); });
       const b = ds.layers[target].getBounds(), p = STATE.map.latLngToContainerPoint(b.getCenter());
       const m = STATE.map.getContainer().getBoundingClientRect(), insp = el("inspector").getBoundingClientRect();
       Table.close(); clearSelection();
@@ -730,7 +770,7 @@ function fixtures(dir) {
   await check("large polygon layers draw tiny shapes as matching rectangles; small layers draw as before", async () => {
     const r = await page.evaluate(async ([big, small]) => {
       clearAll();
-      const frame = () => new Promise((res) => requestAnimationFrame(() => setTimeout(res, 0)));
+      const frame = () => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
       const B = addDataset({ name: "dense", geojson: big }), S = addDataset({ name: "few", geojson: small });
       const marked = { big: B.layers.every((l) => l._omaBatch === true), small: S.layers.some((l) => l._omaBatch) };
       STATE.map.setView([55.75, -3.5], 9, { animate: false }); await frame();

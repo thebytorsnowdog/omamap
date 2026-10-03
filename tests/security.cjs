@@ -116,7 +116,7 @@ function fixtures() {
     await page.evaluate(() => { const ds = STATE.datasets[0]; setColourBy(ds, "status", "categories"); renderLegend(); renderLayerList(); });
     const legend = await page.locator("#legend .lg-label").allTextContents();
     assert.ok(legend.includes("<b>bold</b>"), JSON.stringify(legend));
-    await page.waitForTimeout(300);
+    await page.evaluate(async () => { await Table.pending; await restyleIdle(); });
     assert.deepEqual(await injected(), { flag: undefined, elements: [] });
   });
 
@@ -227,16 +227,19 @@ function fixtures() {
       const placemark = "<Placemark><Point><coordinates>1,1</coordinates></Point></Placemark>";
       const kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>' + placemark.repeat(500001) + "</Document></kml>";
       const gpx = '<?xml version="1.0"?><gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">' + '<wpt lat="1" lon="1"/>'.repeat(500001) + "</gpx>";
-      const out = [];
-      for (const [text, ext] of [[kml, "kml"], [gpx, "gpx"]]) {
-        const t = performance.now();
-        try { OmaParse.xmlToGeoJSON(text, ext); out.push("accepted"); }
-        catch (e) { out.push(e.message); }
-        out.push(performance.now() - t < 3000);
-      }
-      return out;
+      const messages = [], parse = DOMParser.prototype.parseFromString;
+      let parses = 0;
+      DOMParser.prototype.parseFromString = function (...args) { parses++; return parse.apply(this, args); };
+      try {
+        for (const [text, ext] of [[kml, "kml"], [gpx, "gpx"]]) {
+          try { OmaParse.xmlToGeoJSON(text, ext); messages.push("accepted"); }
+          catch (e) { messages.push(e.message); }
+        }
+      } finally { DOMParser.prototype.parseFromString = parse; }
+      return { messages, parses };
     });
-    assert.deepEqual(r, ["File has more than 500,000 placemarks.", true, "File has more than 500,000 waypoints, tracks and routes.", true]);
+    assert.deepEqual(r.messages, ["File has more than 500,000 placemarks.", "File has more than 500,000 waypoints, tracks and routes."]);
+    assert.equal(r.parses, 0, "oversized XML is rejected before DOMParser runs");
   });
 
   await check("only basemap tile hosts were contacted", async () => {

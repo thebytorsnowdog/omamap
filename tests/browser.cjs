@@ -171,8 +171,11 @@ function writeFixtures(dir) {
     assert.equal(await page.locator("#inspector").isHidden(), true, "step 1");
     await clickAt(55.9475, -3.165);
     assert.equal(await page.locator("#inspector").isHidden(), false, "step 2");
-    await page.waitForTimeout(600); // a second click inside the double-click window would zoom instead
+    // These are separate selection gestures; disable double-click zoom for
+    // this check instead of depending on the browser's double-click timeout.
+    await page.evaluate(() => STATE.map.doubleClickZoom.disable());
     await clickAt(55.935, -3.185);
+    await page.evaluate(() => STATE.map.doubleClickZoom.enable());
     assert.equal(await page.locator("#inspector").isHidden(), true, "step 3");
   });
 
@@ -185,8 +188,10 @@ function writeFixtures(dir) {
   });
 
   await check("basemap keys switch providers (5 = satellite, 6 = none)", async () => {
-    await page.keyboard.press("5");
-    await page.waitForTimeout(300);
+    await Promise.all([
+      page.waitForRequest((request) => new URL(request.url()).host === "server.arcgisonline.com"),
+      page.keyboard.press("5")
+    ]);
     assert.equal(await page.evaluate(() => STATE.basemapId), "satellite");
     assert.ok(external.has("server.arcgisonline.com"), "expected satellite tile requests, saw " + [...external]);
     await page.keyboard.press("6");
@@ -216,7 +221,10 @@ function writeFixtures(dir) {
 
   await check("narrow window keeps the inspector usable", async () => {
     await page.setViewportSize({ width: 820, height: 700 });
-    await page.waitForTimeout(200);
+    await page.waitForFunction(() => {
+      const map = STATE.map.getContainer(), size = STATE.map.getSize();
+      return size.x === map.clientWidth && size.y === map.clientHeight;
+    });
     assert.equal(await page.locator("#inspector").isVisible(), true);
     await page.screenshot({ path: path.join(OUT, "narrow.png") });
   });
