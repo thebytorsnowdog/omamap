@@ -98,7 +98,7 @@ Viewed tiles are kept in an ordinary HTTP cache (`~/.cache/omamap`, up to 512 Mi
 
 There is no telemetry, crash reporting or update check. Links in your data (`http`/`https` only) open in your browser when you click them.
 
-See [SECURITY.md](SECURITY.md) for the threat model, what OmaMap defends against, its known limits, and how to report a vulnerability.
+See [SECURITY.md](SECURITY.md) for the threat model, what OmaMap defends against, its known limits, and how to report a vulnerability. The latest repository audit is recorded in [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md).
 
 ### Map data terms
 
@@ -146,6 +146,8 @@ OmaMap's window class is `omamap`.
 
 ## Develop
 
+For a fuller architecture, data-flow and troubleshooting guide, see [docs/OVERVIEW.md](docs/OVERVIEW.md).
+
 ```text
 core/      web app: index.html, app.js (map, datasets, inspector), batchcanvas.js (large-layer drawing),
            parse.js (validation and parsing), parse-worker.js, vendor/
@@ -160,7 +162,7 @@ tests/     parser tests (Node), browser tests (Playwright), host smoke test
 cmake -S host -B build && cmake --build build
 ./build/omamap --new-window some.geojson     # runs against core/ in this checkout
 
-npm install                 # playwright-core and ESLint, for the browser tests and lint
+npm ci --ignore-scripts     # exact locked Playwright and ESLint versions
 npm run lint                # ESLint over core/ and tests/ (catches undefined names across the core scripts)
 npm test                    # parser, validation, bar widget, tile-host and vendor-hash tests
 npm run test:browser        # drives core/ in Chromium, incl. hostile-input tests (CHROMIUM=/usr/bin/chromium)

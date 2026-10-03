@@ -696,7 +696,12 @@ function ringArea(coords) {
   let total = 0;
   for (let i = 0; i < n; i++) {
     const lower = coords[i], middle = coords[(i + 1) % n], upper = coords[(i + 2) % n];
-    total += (upper[0] * RAD - lower[0] * RAD) * Math.sin(middle[1] * RAD);
+    // Take the short way around the globe. Raw longitude subtraction makes
+    // a small polygon crossing ±180° look almost Earth-sized.
+    let dLon = (upper[0] - lower[0]) * RAD;
+    if (dLon > Math.PI) dLon -= 2 * Math.PI;
+    else if (dLon < -Math.PI) dLon += 2 * Math.PI;
+    total += dLon * Math.sin(middle[1] * RAD);
   }
   return Math.abs(total * 6378137 * 6378137 / 2);
 }
