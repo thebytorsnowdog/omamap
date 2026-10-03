@@ -98,7 +98,7 @@ Viewed tiles are kept in an ordinary HTTP cache (`~/.cache/omamap`, up to 512 Mi
 
 There is no telemetry, crash reporting or update check. Links in your data (`http`/`https` only) open in your browser when you click them.
 
-See [SECURITY.md](SECURITY.md) for the threat model, what OmaMap defends against, its known limits, and how to report a vulnerability.
+See [SECURITY.md](SECURITY.md) for the threat model, what OmaMap defends against, its known limits, and how to report a vulnerability. The latest repository audit is recorded in [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md).
 
 ### Map data terms
 
@@ -146,6 +146,8 @@ OmaMap's window class is `omamap`.
 
 ## Develop
 
+For a fuller architecture, data-flow and troubleshooting guide, see [docs/OVERVIEW.md](docs/OVERVIEW.md).
+
 ```text
 core/      web app: index.html, app.js (map, datasets, inspector), batchcanvas.js (large-layer drawing),
            parse.js (validation and parsing), parse-worker.js, vendor/
@@ -160,7 +162,7 @@ tests/     parser tests (Node), browser tests (Playwright), host smoke test
 cmake -S host -B build && cmake --build build
 ./build/omamap --new-window some.geojson     # runs against core/ in this checkout
 
-npm install                 # playwright-core and ESLint, for the browser tests and lint
+npm ci --ignore-scripts     # exact locked Playwright and ESLint versions
 npm run lint                # ESLint over core/ and tests/ (catches undefined names across the core scripts)
 npm test                    # parser, validation, bar widget, tile-host and vendor-hash tests
 npm run test:browser        # drives core/ in Chromium, incl. hostile-input tests (CHROMIUM=/usr/bin/chromium)
@@ -168,6 +170,8 @@ ctest --test-dir build --output-on-failure # native profile-save and recent-list
 tests/host-smoke.sh         # headless checks of the native host and its hardening (run test:browser first)
 npm run serve               # core/ at http://127.0.0.1:8765 for quick UI work
 ```
+
+`npm test` discovers every `tests/*.test.cjs` file. In particular, `tests/measure.test.cjs` covers the map's geodesic measurement logic (including wide polygons and holes), and `tests/style.test.cjs` covers semantic categories, category limits and numeric quantiles.
 
 `OMAMAP_DEBUG=1` prints page console messages and app-scheme requests. Add `QT_FORCE_STDERR_LOGGING=1` when stderr isn't a terminal. `OMAMAP_CORE_DIR` and `OMAMAP_THEME_DIR` override where the web core and the Omarchy theme are read from. `OMAMAP_INSTANCE=name` uses a separate single-instance channel, so a test run never sends files to your open window. Packages should configure with `-DOMAMAP_DEV_CORE=OFF` so the installed binary never reads `core/` from the build tree.
 
