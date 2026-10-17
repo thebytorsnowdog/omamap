@@ -66,7 +66,7 @@ All parsing and validation is in `core/parse.js`, which descends from WIMP's sec
 
 ### Single instance (local IPC)
 
-`omamap FILE` hands files to an already open window over a Unix socket at `$XDG_RUNTIME_DIR/omamap.sock`. That directory is private to your user (mode 0700), and the socket is also mode 0700. The server checks that the connecting process runs as your user (`SO_PEERCRED`). Each line of a message is a percent-encoded `file://` URL, so a file name containing a newline stays one path. Input is capped at 1 MiB pending and 1,000 paths per connection. A connecting process can only ask the window to open files and raise itself. Earlier versions used `/tmp/omamap-$USER`, which another local user could create first.
+`omamap FILE` hands files to an already open window over a Unix socket at `$XDG_RUNTIME_DIR/omamap.sock`. That directory is private to your user (mode 0700), and the socket is also mode 0700. The server checks that the connecting process runs as your user (`SO_PEERCRED`). Each line of a message is a percent-encoded `file://` URL, so a file name containing a newline stays one path. A connection is capped at 1 MiB and 1,000 paths. A line longer than that is rejected before the host copies it, and a launch with more than 1,000 files opens the first 1,000. A connecting process can only ask the window to open files and raise itself. Earlier versions used `/tmp/omamap-$USER`, which another local user could create first.
 
 If no private runtime directory is available, every launch opens its own window.
 
@@ -96,7 +96,7 @@ GitHub CI runs parser/vendor tests, browser/security tests, a Qt native build, n
 
 ## What leaves your machine
 
-- **Basemap tile requests** to the provider of the basemap you choose, or none for **None**. Tile coordinates reveal the area and zoom you are viewing, and the provider sees your IP address and a User-Agent. That is `OmaMap/<version>` for OpenStreetMap and OpenTopoMap, and Qt WebEngine's default for Esri.
+- **Basemap tile requests** to the provider of the basemap you choose, or none for **None**. Tile coordinates reveal the area and zoom you are viewing, and the provider sees your IP address and a User-Agent. Every tile request uses `OmaMap/<version> (+https://github.com/thebytorsnowdog/omamap)` and does not send the page address as a Referer.
 - **Links you click** open in your browser.
 - Nothing else. Your data, file names and profiles never leave the machine. There is no telemetry, crash reporting or update check, and the window cannot contact any other host.
 

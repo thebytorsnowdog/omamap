@@ -24,6 +24,29 @@ function keyboard() {
   };
 }
 
+test("a saved profile is reported by file name", () => {
+  const nodes = {};
+  const element = () => ({
+    className: "", textContent: "", hidden: true,
+    style: {}, classList: { add() {}, remove() {} },
+    setAttribute() {}, addEventListener() {}, appendChild() {}, remove() {}
+  });
+  const context = vm.createContext({
+    document: {
+      addEventListener() {},
+      createElement: element,
+      getElementById(id) { return nodes[id] || (nodes[id] = element()); }
+    },
+    window: {},
+    setTimeout() {}
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "core", "app.js"), "utf8") + `
+    profileSaved("/home/user/secret/clients/work.omamap");
+    this.status = document.getElementById("status-text").textContent;
+  `, context);
+  assert.equal(context.status, "Saved profile work.omamap.");
+});
+
 test("Escape notifies search listeners after clearing a query", () => {
   const keys = keyboard();
   let query = "roads", blurred = false;

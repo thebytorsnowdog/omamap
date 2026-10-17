@@ -1,5 +1,6 @@
 #include "scheme.h"
 
+#include <QByteArray>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -145,6 +146,9 @@ void RequestFilter::interceptRequest(QWebEngineUrlRequestInfo &info)
         info.block(true);
         return;
     }
-    if (host == QLatin1String("tile.openstreetmap.org") || host.endsWith(QLatin1String(".tile.opentopomap.org")))
-        info.setHttpHeader("User-Agent", "OmaMap/" OMAMAP_VERSION " (+https://github.com/thebytorsnowdog/omamap)");
+    // One identifiable agent for every basemap. The page's own address is not
+    // useful to a tile server, and the default engine string would add a
+    // browser version on top of the area the tile request already reveals.
+    info.setHttpHeader("User-Agent", "OmaMap/" OMAMAP_VERSION " (+https://github.com/thebytorsnowdog/omamap)");
+    info.setHttpHeader("Referer", QByteArray());
 }

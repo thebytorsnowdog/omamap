@@ -1,7 +1,10 @@
 "use strict";
 // A bounded adaptive grid narrows hit tests before the renderer performs the
-// exact geometry test. Very large geometries occupy a separate overflow list,
-// avoiding an entry in every cell. Feature indices preserve stacking order.
+// exact geometry test. Geometries that would fill too many fine cells go into
+// a coarser grid, and only geometries that cover that coarser grid as well
+// stay on the overflow list checked for every query. Feature indices preserve
+// stacking order. Search results are the same set a full bounding-box scan
+// would return.
 class SpatialIndex {
   constructor(features) {
     this.boxes = new Float64Array(features.length * 4);
@@ -20,28 +23,44 @@ class SpatialIndex {
     this.west = west; this.south = south;
     this.size = Math.max(1,Math.min(256,Math.ceil(Math.sqrt(features.length / 8))));
     this.dx = (east-west || 1) / this.size; this.dy = (north-south || 1) / this.size;
-    this.cells = new Map(); this.wide = [];
+    this.coarse = Math.max(1,Math.min(32,this.size));
+    this.cdx = (east-west || 1) / this.coarse; this.cdy = (north-south || 1) / this.coarse;
+    this.cells = new Map(); this.coarseCells = new Map(); this.wide = [];
     for (let i = 0; i < features.length; i++) {
-      const b = this.boxes.subarray(i*4,i*4+4), r = this.range(...b);
-      if ((r[2]-r[0]+1)*(r[3]-r[1]+1)>64) { this.wide.push(i); continue; }
-      for (let y=r[1]; y<=r[3]; y++) for (let x=r[0]; x<=r[2]; x++) {
-        const key=y*this.size+x;
-        if (!this.cells.has(key)) this.cells.set(key,[]);
-        this.cells.get(key).push(i);
-      }
+      const b = this.boxes.subarray(i*4,i*4+4);
+      const fine = this.range(b[0],b[1],b[2],b[3]);
+      if (this.span(fine) <= 64) { this.fill(this.cells, this.size, fine, i); continue; }
+      const coarse = this.coarseRange(b[0],b[1],b[2],b[3]);
+      if (this.span(coarse) <= 64) this.fill(this.coarseCells, this.coarse, coarse, i);
+      else this.wide.push(i);
     }
   }
-  range(w,s,e,n) {
-    const clamp = (v) => Math.max(0,Math.min(this.size-1,v));
-    return [clamp(Math.floor((w-this.west)/this.dx)),clamp(Math.floor((s-this.south)/this.dy)),
-      clamp(Math.floor((e-this.west)/this.dx)),clamp(Math.floor((n-this.south)/this.dy))];
-  }
-  search(w,s,e,n) {
-    const r=this.range(w,s,e,n), found=new Set(this.wide);
+  span(r) { return (r[2]-r[0]+1)*(r[3]-r[1]+1); }
+  fill(cells, stride, r, i) {
     for (let y=r[1]; y<=r[3]; y++) for (let x=r[0]; x<=r[2]; x++) {
-      const cell=this.cells.get(y*this.size+x);
+      const key=y*stride+x;
+      let list=cells.get(key);
+      if (!list) cells.set(key, list=[]);
+      list.push(i);
+    }
+  }
+  clampRange(w,s,e,n,size,dx,dy) {
+    const clamp = (v) => Math.max(0,Math.min(size-1,v));
+    return [clamp(Math.floor((w-this.west)/dx)),clamp(Math.floor((s-this.south)/dy)),
+      clamp(Math.floor((e-this.west)/dx)),clamp(Math.floor((n-this.south)/dy))];
+  }
+  range(w,s,e,n) { return this.clampRange(w,s,e,n,this.size,this.dx,this.dy); }
+  coarseRange(w,s,e,n) { return this.clampRange(w,s,e,n,this.coarse,this.cdx,this.cdy); }
+  collect(found, cells, stride, r) {
+    for (let y=r[1]; y<=r[3]; y++) for (let x=r[0]; x<=r[2]; x++) {
+      const cell=cells.get(y*stride+x);
       if (cell) for (const i of cell) found.add(i);
     }
+  }
+  search(w,s,e,n) {
+    const found=new Set(this.wide);
+    this.collect(found, this.cells, this.size, this.range(w,s,e,n));
+    this.collect(found, this.coarseCells, this.coarse, this.coarseRange(w,s,e,n));
     const out=[];
     for (const i of found) {
       const k=i*4,b=this.boxes;

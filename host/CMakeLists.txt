@@ -16,6 +16,7 @@ find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network WebEngineCore 
 
 add_executable(omamap
   main.cpp
+  ipc.cpp ipc.h
   profile_save.cpp profile_save.h
   recent.cpp recent.h
   scheme.cpp scheme.h
@@ -50,6 +51,10 @@ if(BUILD_TESTING)
   target_include_directories(trusted-core-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(trusted-core-test PRIVATE Qt6::Core)
   add_test(NAME trusted-core COMMAND trusted-core-test)
+  add_executable(ipc-test ../tests/ipc.cpp ipc.cpp)
+  target_include_directories(ipc-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(ipc-test PRIVATE Qt6::Core)
+  add_test(NAME ipc COMMAND ipc-test)
 endif()
 
 install(TARGETS omamap RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

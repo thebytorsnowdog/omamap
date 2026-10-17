@@ -4,6 +4,7 @@
 //
 // A second invocation hands its files to the running window and exits.
 
+#include "ipc.h"
 #include "scheme.h"
 #include "theme.h"
 #include "trusted_core.h"
@@ -71,8 +72,15 @@ static QString socketPath()
 
 // Messages are one file:// URL per line. Percent-encoding keeps a file name
 // containing a newline (legal on Linux) from turning into two paths.
-static constexpr qint64 MaxPendingBytes = 1024 * 1024;   // a line longer than this is not a path
-static constexpr int MaxPathsPerConnection = 1000;
+// The running window accepts at most IpcMaxPaths of them, and at most
+// IpcMaxPendingBytes of text (see takeIpcLines).
+
+static QStringList limitFiles(const QStringList &files)
+{
+    if (files.size() <= IpcMaxPaths) return files;
+    qWarning("omamap: opening the first %d of %lld files", IpcMaxPaths, static_cast<long long>(files.size()));
+    return files.mid(0, IpcMaxPaths);
+}
 
 // Returns true if a running OmaMap accepted the files.
 static bool forwardToRunningInstance(const QString &path, const QStringList &files)
@@ -82,7 +90,22 @@ static bool forwardToRunningInstance(const QString &path, const QStringList &fil
     socket.connectToServer(path);
     if (!socket.waitForConnected(300)) return false;
     QByteArray message;
-    for (const QString &file : files) message += QUrl::fromLocalFile(file).toEncoded() + '\n';
+    qint64 bytes = 0;
+    int count = 0;
+    for (const QString &file : files) {
+        if (count >= IpcMaxPaths) break;
+        const QByteArray encoded = QUrl::fromLocalFile(file).toEncoded() + '\n';
+        if (encoded.size() > IpcMaxPendingBytes || bytes > IpcMaxPendingBytes - encoded.size()) {
+            if (count > 0) qWarning("omamap: sent the first %d files; the rest did not fit in one message", count);
+            break;
+        }
+        message += encoded;
+        bytes += encoded.size();
+        count++;
+    }
+    // Nothing fit (one absurdly long path). Open it in this process instead
+    // of raising the existing window and dropping the file.
+    if (count == 0 && !files.isEmpty()) return false;
     if (message.isEmpty()) message = "\n";   // just raise the window
     socket.write(message);
     socket.flush();
@@ -145,6 +168,7 @@ int main(int argc, char *argv[])
         const QString path = url.isLocalFile() ? url.toLocalFile() : arg;
         files << QFileInfo(path).absoluteFilePath();
     }
+    files = limitFiles(files);
 
     const QString socket = socketPath();
     if (!parser.isSet(newInstance) && forwardToRunningInstance(socket, files)) {
@@ -183,22 +207,16 @@ int main(int argc, char *argv[])
                 QObject::connect(client, &QLocalSocket::disconnected, client, &QObject::deleteLater);
                 if (!sameUser(client)) { client->abort(); continue; }
                 QObject::connect(client, &QLocalSocket::readyRead, &window, [client, &window] {
-                    // Wait for complete lines; a partial line stays buffered, up to a limit.
-                    QStringList paths;
-                    int received = client->property("paths").toInt();
-                    while (client->canReadLine()) {
-                        const QByteArray line = client->readLine().trimmed();
-                        if (line.isEmpty() || received >= MaxPathsPerConnection) continue;
-                        const QUrl url = QUrl::fromEncoded(line, QUrl::StrictMode);
-                        if (!url.isLocalFile() || !QDir::isAbsolutePath(url.toLocalFile())) continue;
-                        paths << url.toLocalFile();
-                        received++;
-                    }
-                    client->setProperty("paths", received);
-                    if (client->bytesAvailable() > MaxPendingBytes) { client->abort(); return; }
-                    if (!paths.isEmpty()) window.openFiles(paths);
+                    // Wait for complete lines. A partial line stays buffered;
+                    // a line past the cap closes the connection instead of
+                    // being copied into memory.
+                    const IpcTake taken = takeIpcLines(client, client->property("ipcPaths").toInt(), client->property("ipcBytes").toLongLong());
+                    client->setProperty("ipcPaths", taken.received);
+                    client->setProperty("ipcBytes", taken.consumed);
+                    if (!taken.paths.isEmpty()) window.openFiles(taken.paths);
                     window.raise();
                     window.activateWindow();
+                    if (taken.abort) client->abort();
                 });
             }
         });

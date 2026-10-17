@@ -96,16 +96,18 @@ function fieldIsNumeric(ds, field) {
 
 /* --------------------------- Classification ------------------------------ */
 
-function buildCategories(ds, field) {
+function* buildCategories(ds, field) {
   const byKey = new Map();
-  ds.features.forEach(function (f) {
-    const v = propOf(f.properties, field);
-    if (isMissing(v)) return;
+  const features = ds.features;
+  for (let i = 0; i < features.length; i++) {
+    const v = propOf(features[i].properties, field);
+    if ((i & 8191) === 0) yield;
+    if (isMissing(v)) continue;
     const key = normalizeValue(v);
     const entry = byKey.get(key);
     if (entry) entry.count++;
     else byKey.set(key, { key: key, label: typeof v === "object" ? JSON.stringify(v) : String(v).trim(), count: 1 });
-  });
+  }
   let entries = Array.from(byKey.values());
   const allNumeric = entries.length > 0 && entries.every(function (e) { return numericValue(e.key) !== null; });
 
@@ -144,9 +146,15 @@ function niceNumber(x) {
 }
 
 /* Quantile ranges (up to 5 classes) for numeric fields. */
-function buildRanges(ds, field) {
+function* buildRanges(ds, field) {
   const values = [];
-  ds.features.forEach(function (f) { const x = numericValue(propOf(f.properties, field)); if (x !== null) values.push(x); });
+  const features = ds.features;
+  for (let i = 0; i < features.length; i++) {
+    if ((i & 8191) === 0) yield;
+    const x = numericValue(propOf(features[i].properties, field));
+    if (x !== null) values.push(x);
+  }
+  yield;
   values.sort(function (a, b) { return a - b; });
   const breaks = [];
   const k = Math.min(5, new Set(values).size);
@@ -179,26 +187,57 @@ function classifyValue(byField, v) {
   return idx === undefined ? CLASS_OTHER : idx;
 }
 
-/* Set or clear colour-by-field on a dataset. */
-function setColourBy(ds, field, mode, reverse) {
+/* Set or clear colour-by-field on a dataset. The steps yield so a profile
+   restore or the style controls can keep the window responsive; nothing is
+   published on the dataset until the last step. */
+function* colourBySteps(ds, field, mode, reverse) {
   if (!field) { ds.style.byField = null; ds.classOf = null; return; }
-  const built = mode === "ranges" ? buildRanges(ds, field) : buildCategories(ds, field);
+  const built = mode === "ranges" ? yield* buildRanges(ds, field) : yield* buildCategories(ds, field);
   const byField = { field: field, mode: mode, reverse: !!reverse, classes: built.classes, colouring: built.colouring, index: new Map() };
   if (mode !== "ranges") built.classes.forEach(function (c, i) { byField.index.set(c.key, i); });
   const classOf = new Uint16Array(ds.features.length);
   let missing = 0, other = 0;
   if (mode === "ranges") byField.classes.forEach(function (c) { c.count = 0; });
-  ds.features.forEach(function (f, i) {
-    const c = classifyValue(byField, propOf(f.properties, field));
+  const features = ds.features;
+  for (let i = 0; i < features.length; i++) {
+    if ((i & 4095) === 0) yield;
+    const c = classifyValue(byField, propOf(features[i].properties, field));
     classOf[i] = c;
     if (c === CLASS_MISSING) missing++;
     else if (c === CLASS_OTHER) other++;
     else if (mode === "ranges") byField.classes[c].count++;
-  });
+  }
   byField.missingCount = missing;
   byField.otherCount = other;
   ds.style.byField = byField;
   ds.classOf = classOf;
+}
+
+function setColourBy(ds, field, mode, reverse) {
+  const job = colourBySteps(ds, field, mode, reverse);
+  let step;
+  do { step = job.next(); } while (!step.done);
+}
+
+// Style controls on a large dataset. A newer choice supersedes an older one
+// before the older one can publish its classes.
+function paintColourBy(ds, field, mode, reverse) {
+  const token = (ds._colourToken = (ds._colourToken || 0) + 1);
+  const job = colourBySteps(ds, field, mode, reverse);
+  const many = ds.features.length > 8000;
+  if (many) setLoading(true, "Colouring " + ds.name + "…");
+  const step = function () {
+    if (ds._colourToken !== token) return;
+    const started = performance.now();
+    let result;
+    do { result = job.next(); } while (!result.done && performance.now() - started < 8);
+    if (ds._colourToken !== token) return;
+    if (!result.done) { setTimeout(step, 0); return; }
+    if (many) setLoading(false);
+    scheduleRestyle(ds);
+    renderLayerList();
+  };
+  step();
 }
 
 /* ------------------------------ Colours ---------------------------------- */
@@ -400,9 +439,7 @@ function renderStyleEditor(ds) {
     byField ? st.byField.field : "",
     function (field) {
       const mode = field && fieldIsNumeric(ds, field) && !smallCategoryCount(ds, field) ? "ranges" : "categories";
-      setColourBy(ds, field, mode, false);
-      scheduleRestyle(ds);
-      renderLayerList();
+      paintColourBy(ds, field, mode, false);
     });
   box.appendChild(control("Colour by", fieldSelect));
 
@@ -412,7 +449,7 @@ function renderStyleEditor(ds) {
     box.appendChild(control("Method", selectBox([
       { value: "categories", label: "Each value" },
       { value: "ranges", label: "Number ranges", disabled: !numeric }
-    ], bf.mode, function (mode) { setColourBy(ds, bf.field, mode, bf.reverse); scheduleRestyle(ds); renderLayerList(); })));
+    ], bf.mode, function (mode) { paintColourBy(ds, bf.field, mode, bf.reverse); })));
     if (bf.colouring === "ramp") {
       const rev = document.createElement("input"); rev.type = "checkbox"; rev.checked = bf.reverse;
       rev.addEventListener("change", function () { bf.reverse = rev.checked; scheduleRestyle(ds); });
