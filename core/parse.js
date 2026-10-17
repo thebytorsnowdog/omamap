@@ -225,7 +225,11 @@
       const props = feature.properties;
       if (props !== undefined && props !== null && (typeof props !== "object" || Array.isArray(props))) throw new Error("Feature properties must be a JSON object.");
       if (props) {
-        for (const key in props) {
+        // Own names only, matching checkJsonValue. Inherited enumerable
+        // names are not attributes of this feature.
+        const names = Object.keys(props);
+        for (let n = 0; n < names.length; n++) {
+          const key = names[n];
           if (!fields.has(key)) {
             fields.add(key);
             budget.bytes += key.length * 2 + 16;
@@ -349,6 +353,9 @@
   }
 
   function parseJson(text) {
+    // decodeText drops a UTF-8 BOM. A caller that already has a string may
+    // still carry U+FEFF, which JSON.parse rejects.
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
     try { return JSON.parse(text); }
     catch (e) { throw new Error("File is not valid JSON."); }
   }
@@ -738,6 +745,35 @@
     if (rows !== records) throw new Error("The .shp and .dbf record counts disagree.");
   }
 
+  // shpjs turns a blank numeric DBF cell into NaN, and the same for a cell
+  // that is not a number. Neither should reject the rest of the layer.
+  function blankNonFiniteAttributes(fc) {
+    const features = fc && fc.features;
+    if (!Array.isArray(features)) return 0;
+    let count = 0;
+    for (let i = 0; i < features.length; i++) {
+      const props = features[i] && features[i].properties;
+      if (!props || typeof props !== "object") continue;
+      const keys = Object.keys(props);
+      for (let k = 0; k < keys.length; k++) {
+        const value = props[keys[k]];
+        if (typeof value === "number" && !Number.isFinite(value)) {
+          props[keys[k]] = null;
+          count++;
+        }
+      }
+    }
+    return count;
+  }
+
+  function shapefileDataset(name, raw, hasPrj) {
+    const blanks = blankNonFiniteAttributes(raw);
+    const warnings = [];
+    if (!hasPrj) warnings.push("No .prj file: coordinates were assumed to be WGS84.");
+    if (blanks) warnings.push(blanks.toLocaleString() + (blanks === 1 ? " blank or invalid numeric cell was" : " blank or invalid numeric cells were") + " read as missing.");
+    return { name: name, geojson: validateFeatureCollection(raw), warnings: warnings };
+  }
+
   async function shapefileParts(parts) {
     if (!parts.shp) throw new Error("Shapefile is missing its .shp file.");
     checkShapefile(parts.shp, parts.dbf);
@@ -771,7 +807,7 @@
       if (filename.endsWith(".shp")) {
         const stem = filename.slice(0, -4);
         const raw = await shapefileParts({ shp: bytes, dbf: entries.get(stem + ".dbf"), prj: entries.get(stem + ".prj"), cpg: entries.get(stem + ".cpg") });
-        counted({ name: label, geojson: validateFeatureCollection(raw), warnings: entries.has(stem + ".prj") ? [] : ["No .prj file: coordinates were assumed to be WGS84."] });
+        counted(shapefileDataset(label, raw, entries.has(stem + ".prj")));
       } else if (/\.(geojson|json)$/.test(filename)) {
         counted(withNotes(label, jsonToGeoJSON(decodeText(bytes))));
       } else if (filename.endsWith(".csv")) {
@@ -984,7 +1020,7 @@
       shp: parts.shp && new Uint8Array(parts.shp), dbf: parts.dbf && new Uint8Array(parts.dbf),
       prj: parts.prj && new Uint8Array(parts.prj), cpg: parts.cpg && new Uint8Array(parts.cpg)
     });
-    return [{ name: name, geojson: validateFeatureCollection(raw), warnings: parts.prj ? [] : ["No .prj file: coordinates were assumed to be WGS84."] }];
+    return [shapefileDataset(name, raw, !!parts.prj)];
   }
 
   const api = {

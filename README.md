@@ -108,7 +108,7 @@ Fields from every feature are included, even when they first appear late in a da
 - **GeoJSON** (`.geojson`, `.json`) in WGS84 longitude/latitude.
 - **KML**, **KMZ** and **GPX**, also inside a ZIP alongside other layers.
 - **CSV**, **TSV** or delimited **TXT** with latitude/longitude columns (`lat`/`lon`, `latitude`/`longitude`), or British National Grid easting/northing (`easting`/`northing`, or `x`/`y` holding grid values). Cells stay as text; coordinates must be complete numeric values, and headers must be unique and non-empty.
-- **Shapefiles**, either zipped or as loose `.shp` + `.dbf` (+ `.prj`, `.cpg`) files dropped together. A `.prj` file is used to reproject to WGS84. A ZIP with several layers opens as one dataset per layer.
+- **Shapefiles**, either zipped or as loose `.shp` + `.dbf` (+ `.prj`, `.cpg`) files dropped together. A `.prj` file is used to reproject to WGS84. A ZIP with several layers opens as one dataset per layer. A blank numeric cell is kept as a missing value, and the dataset says how many were read that way.
 
 British National Grid data (EPSG:27700) is converted to WGS84 automatically, to within about 5 m (the same 7-parameter method PROJ uses without grid files). That covers easting/northing CSV, GeoJSON that declares EPSG:27700 (as older QGIS exports do), and shapefiles with a BNG `.prj`. CSV and GeoJSON conversions are noted in the dataset list.
 
@@ -136,7 +136,7 @@ Your data files never leave your machine. Only basemap tiles are fetched over th
 | Satellite | Esri World Imagery |
 | None | Nothing is requested |
 
-Tile requests reveal the area you are viewing to that provider. The window can't contact any other host. A Content Security Policy in the page and a request filter in the host both enforce this.
+Tile requests reveal the area you are viewing to that provider. The window can't contact any other host. A Content Security Policy in the page and a request filter in the host both enforce this. Tile requests identify themselves as `OmaMap/<version>` and do not send the page address.
 
 Viewed tiles are kept in an ordinary HTTP cache (`~/.cache/omamap`, up to 512 MiB) that follows each provider's caching headers. OmaMap never downloads areas in bulk or ahead of time. The last map view and basemap choice are remembered in `~/.local/share/omamap`, the folder you last saved a profile to in `~/.config/omamap`, and recently opened files (for the bar widget) in `~/.local/state/omamap/recent.json`, readable only by you.
 

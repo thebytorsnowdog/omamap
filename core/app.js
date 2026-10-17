@@ -351,7 +351,7 @@ function* prepareDataset(parsed, base) {
     warnings: parsed.warnings || []
   };
   ds.style = defaultStyle(ds);
-  if (parsed.style) applySavedStyle(ds, parsed.style);
+  if (parsed.style) yield* applySavedStyle(ds, parsed.style);
   const cache = new Map();
   for (let i = 0; i < layers.length; i++) {
     styleFeatureLayer(layers[i], ds, false, cache);
@@ -361,11 +361,11 @@ function* prepareDataset(parsed, base) {
 }
 
 // A cleaned profile style (see OmaParse.cleanStyle) applied before the first draw.
-function applySavedStyle(ds, st) {
+function* applySavedStyle(ds, st) {
   ["colour", "fillOpacity", "weight", "radius", "outline"].forEach(function (k) { if (st[k] !== null && st[k] !== undefined) ds.style[k] = st[k]; });
   if (st.byField && datasetFields(ds).indexOf(st.byField.field) >= 0) {
     const mode = st.byField.mode === "ranges" && fieldIsNumeric(ds, st.byField.field) ? "ranges" : "categories";
-    setColourBy(ds, st.byField.field, mode, st.byField.reverse);
+    yield* colourBySteps(ds, st.byField.field, mode, st.byField.reverse);
   }
 }
 
@@ -1147,6 +1147,13 @@ function openUrls(list) {
       arrayBuffer: function () {
         return fetch(item.url).then(function (r) {
           if (!r.ok) throw new Error("Could not read " + item.name + ".");
+          const ext = OmaParse.extOf(item.name);
+          const limit = ext === "zip" || ext === "kmz" ? OmaParse.LIMITS.zipBytes : OmaParse.LIMITS.fileBytes;
+          const declared = Number(r.headers.get("content-length"));
+          if (Number.isFinite(declared) && declared > limit) {
+            if (r.body && typeof r.body.cancel === "function") r.body.cancel();
+            throw new Error("File is too large (limit " + Math.round(limit / 1048576) + " MiB).");
+          }
           return r.arrayBuffer();
         });
       }
@@ -1158,9 +1165,11 @@ function openUrls(list) {
 // Called by the desktop app when it starts and after it saves a profile.
 function setHost(info) { STATE.host = info && typeof info === "object" ? info : { present: true }; }
 function profileSaved(path) {
-  const name = String(path || "").split("/").pop();
+  const name = String(path || "").split("/").pop() || "profile";
   toast("Profile saved", name, "ok");
-  setStatus("Saved profile to " + String(path || "").slice(0, 300) + ".");
+  // The directory stays off the status bar: a shared screen should not show
+  // where the profile lives.
+  setStatus("Saved profile " + name + ".");
 }
 
 window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, setHost: setHost, profileSaved: profileSaved, version: "0.3.3" };

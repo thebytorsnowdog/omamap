@@ -19,6 +19,26 @@ test('spatial queries match brute force and preserve reverse feature order', () 
   assert.ok(index.wide.includes(boxes.length-1));
 });
 
+test('long local geometries are not scanned for every query', () => {
+  const features = [];
+  for (let i = 0; i < 40000; i++) {
+    const y = i * 0.002;
+    features.push({ geometry: { type: 'LineString', coordinates: [[-170, y], [170, y]] } });
+  }
+  features.push({ geometry: { type: 'LineString', coordinates: [[-180, -90], [180, 90]] } });
+  const index = new SpatialIndex(features);
+  assert.deepEqual(index.wide, [40000]);
+  const w = -1, s = 0.01, e = 1, n = 0.02;
+  const want = features.flatMap((feature, i) => {
+    const c = feature.geometry.coordinates;
+    const x0 = Math.min(c[0][0], c[1][0]), x1 = Math.max(c[0][0], c[1][0]);
+    const y0 = Math.min(c[0][1], c[1][1]), y1 = Math.max(c[0][1], c[1][1]);
+    return x0 <= e && x1 >= w && y0 <= n && y1 >= s ? [i] : [];
+  }).reverse();
+  assert.deepEqual(index.search(w, s, e, n), want);
+  assert.ok(want.length < 30);
+});
+
 test('coincident points and nested geometries are searchable at boundaries', () => {
   const index=new SpatialIndex([{geometry:{type:'GeometryCollection',geometries:[{type:'Point',coordinates:[0,0]}]}},{geometry:{type:'Point',coordinates:[0,0]}}]);
   assert.deepEqual(index.search(0,0,0,0),[1,0]);

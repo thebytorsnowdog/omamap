@@ -515,6 +515,35 @@ test("shapefile attributes must match the geometry count and DBF record layout",
   assert.deepEqual(valid.geojson.features.map((f) => f.properties.name), ["First", "Second"]);
 });
 
+function makeNumericDbf(values) {
+  const width = 10;
+  const head = Buffer.alloc(32);
+  head.writeUInt8(3, 0);
+  head.writeUInt32LE(values.length, 4);
+  head.writeUInt16LE(32 + 32 + 1, 8);
+  head.writeUInt16LE(1 + width, 10);
+  const field = Buffer.alloc(32);
+  field.write("count", 0, "latin1");
+  field.write("N", 11, "latin1");
+  field.writeUInt8(width, 16);
+  const rows = values.map((v) => {
+    const cell = v == null ? " ".repeat(width) : String(v).padStart(width).slice(0, width);
+    return Buffer.from(" " + cell, "latin1");
+  });
+  return Buffer.concat([head, field, Buffer.from([13]), ...rows, Buffer.from([26])]);
+}
+
+test("blank numeric shapefile cells are missing values, not a rejected file", async () => {
+  const shp = makeShp([[-3.2, 55.9], [-3.1, 55.8]]);
+  const [blank] = await P.parseShapefileSet("blank", { shp: ab(shp), dbf: ab(makeNumericDbf([12, null])) });
+  assert.equal(blank.geojson.features[0].properties.count, 12);
+  assert.equal(blank.geojson.features[1].properties.count, null);
+  assert.match(blank.warnings.join("\n"), /1 blank or invalid numeric cell was read as missing/);
+  const [clean] = await P.parseShapefileSet("nums", { shp: ab(shp), dbf: ab(makeNumericDbf([1, 2])) });
+  assert.deepEqual(clean.geojson.features.map((f) => f.properties.count), [1, 2]);
+  assert.equal(clean.warnings.some((w) => /numeric cell/.test(w)), false);
+});
+
 test("a CSV with more than 10 million cells is refused before features are built", () => {
   // 100 MiB of one-character cells needed about 3 GiB once built.
   const header = ["lat", "lon"].concat(Array.from({ length: 498 }, (_, i) => "c" + i)).join(",");
@@ -569,6 +598,24 @@ test("workspace limits count all datasets together", () => {
   assert.throws(() => P.checkWorkspace([{features:{length:500001},coordinateCount:1,estimatedBytes:1},{features:{length:500000},coordinateCount:1,estimatedBytes:1}]), /Workspace memory budget/);
   assert.throws(() => P.checkWorkspace([{features:[],coordinateCount:10000001,estimatedBytes:1}]), /Workspace memory budget/);
   assert.throws(() => P.checkWorkspace([{features:[],coordinateCount:0,estimatedBytes:P.LIMITS.workspaceBytes},{features:[],coordinateCount:0,estimatedBytes:1}]), /Workspace memory budget/);
+});
+
+test("GeoJSON accepts a leading BOM character and BOM bytes", async () => {
+  const fc = P.jsonToGeoJSON("\ufeff" + POINT_FC);
+  assert.equal(fc.features[0].properties.name, "Edinburgh");
+  const [ds] = await P.parseBytes("x.geojson", bytes("\ufeff" + POINT_FC));
+  assert.equal(ds.geojson.features[0].properties.name, "Edinburgh");
+});
+
+test("inherited property names are not dataset fields", () => {
+  const parent = {};
+  for (let i = 0; i < 1001; i++) parent["extra" + i] = i;
+  const props = Object.create(parent);
+  props.name = "Edinburgh";
+  assert.throws(() => P.validateFeatureCollection({
+    type: "FeatureCollection",
+    features: [{ type: "Feature", properties: props, geometry: { type: "Point", coordinates: [-3.19, 55.95] } }]
+  }), /JSON values/);
 });
 
 test("CSV preflight accepts a UTF-8 BOM before quoted headers", () => {

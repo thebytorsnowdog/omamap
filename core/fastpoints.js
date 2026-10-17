@@ -75,6 +75,7 @@ const FastPoints = L.Layer.extend({
 
   fillItems: function (items, start, end) {
     const crs = L.CRS.EPSG3857;
+    this._pointBins = null;
     for (let i = start; i < end; i++) {
       const it = items[i];
       this._points[i] = new FastPoint(this, i, it.latlng, it.feature, it.index);
@@ -229,17 +230,26 @@ const FastPoints = L.Layer.extend({
     const xy = this._xy0, s = this._scale, ox = this._origin.x, oy = this._origin.y;
     const minX = b.min.x - 20, minY = b.min.y - 20, maxX = b.max.x + 20, maxY = b.max.y + 20;
     const pts = this._points;
-    for (let i = 0; i < pts.length; i++) {
+    const visit = (i) => {
       const x = xy[2 * i] * s - ox, y = xy[2 * i + 1] * s - oy;
-      if (x < minX || x > maxX || y < minY || y > maxY) continue;
+      if (x < minX || x > maxX || y < minY || y > maxY) return;
       const pt = pts[i];
-      if (pt === this._front) continue;
+      if (pt === this._front) return;
       if (!group || group.key !== pt._key) {
         flush();
         group = { key: pt._key, style: pt.options, xs: [], ys: [] };
       }
       group.xs.push(x); group.ys.push(y);
+    };
+    // Zoomed-in 2D layers skip points whose bins are off screen. A wide view
+    // still walks every point: collecting and sorting them would cost more.
+    let order = null;
+    if (pts.length >= 2000) {
+      if (!this._pointBins || this._pointBins.count !== pts.length) this._pointBins = pointBins(xy, pts.length);
+      order = visiblePointIndices(this._pointBins, minX, minY, maxX, maxY, s, ox, oy);
     }
+    if (order) { for (let k = 0; k < order.length; k++) visit(order[k]); }
+    else { for (let i = 0; i < pts.length; i++) visit(i); }
     flush();
     if (this._front && this._front._group === this) {
       const f = this._front, slot = f._slot;
@@ -402,6 +412,42 @@ function colour(hex) {
     colourCache.set(hex, c);
   }
   return c;
+}
+
+// Bins in zoom-0 projected pixels. A cell covers a few pixels of the whole
+// world, so a zoomed-in view touches only a handful of them.
+function pointBins(xy, count) {
+  const cell = 4;
+  const bins = new Map();
+  for (let i = 0; i < count; i++) {
+    const key = Math.floor(xy[2 * i] / cell) + ":" + Math.floor(xy[2 * i + 1] / cell);
+    const bin = bins.get(key);
+    if (bin) bin.push(i);
+    else bins.set(key, [i]);
+  }
+  return { cell: cell, bins: bins, count: count };
+}
+
+// Indices inside the padded view, in feature order, or null when a linear
+// scan is the cheaper way to cover this view.
+function visiblePointIndices(built, minX, minY, maxX, maxY, scale, originX, originY) {
+  if (!built || !scale) return null;
+  const cell = built.cell;
+  const xLo = (minX + originX) / scale, xHi = (maxX + originX) / scale;
+  const yLo = (minY + originY) / scale, yHi = (maxY + originY) / scale;
+  const ix0 = Math.floor(Math.min(xLo, xHi) / cell), ix1 = Math.floor(Math.max(xLo, xHi) / cell);
+  const iy0 = Math.floor(Math.min(yLo, yHi) / cell), iy1 = Math.floor(Math.max(yLo, yHi) / cell);
+  const nx = ix1 - ix0 + 1, ny = iy1 - iy0 + 1;
+  if (nx > 64 || ny > 64 || nx * ny * 4 >= built.count) return null;
+  const idx = [];
+  for (let iy = iy0; iy <= iy1; iy++) {
+    for (let ix = ix0; ix <= ix1; ix++) {
+      const bin = built.bins.get(ix + ":" + iy);
+      if (bin) for (let k = 0; k < bin.length; k++) idx.push(bin[k]);
+    }
+  }
+  if (idx.length > 1) idx.sort(function (a, b) { return a - b; });
+  return idx;
 }
 
 /* ------------------------------ 2D fallback ------------------------------ */

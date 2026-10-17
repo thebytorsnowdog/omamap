@@ -22,7 +22,7 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(source + `\nthis.StyleTest = {
-  CLASS_OTHER, CLASS_MISSING, fieldIsNumeric, setColourBy, featureColour
+  CLASS_OTHER, CLASS_MISSING, fieldIsNumeric, setColourBy, colourBySteps, featureColour
 };`, context);
 const S = context.StyleTest;
 const dataset = (values) => ({
@@ -80,6 +80,18 @@ test("numeric categories preserve negative signs and scientific exponents in ram
   assert.deepEqual(Array.from(ds.style.byField.classes, (c) => c.key), ["-10", "-2", "-1", "0", "1e-3", "1", "2", "10"]);
   assert.equal(ds.style.byField.colouring, "ramp");
   assert.deepEqual(Array.from(ds.classOf), [0, 1, 2, 3, 4, 5, 6, 7]);
+});
+
+test("large classification yields and publishes only when finished", () => {
+  const ds = dataset(Array.from({ length: 20000 }, (_, i) => "v" + (i % 7)));
+  const job = S.colourBySteps(ds, "value", "categories", false);
+  let yields = 0;
+  let step = job.next();
+  while (!step.done) { yields++; assert.equal(ds.classOf, null); step = job.next(); }
+  assert.ok(yields > 2);
+  assert.equal(ds.classOf.length, 20000);
+  assert.equal(ds.style.byField.classes.length, 7);
+  assert.equal(ds.style.byField.classes.reduce((sum, c) => sum + c.count, 0), 20000);
 });
 
 test("semantic category labels still normalize hyphens and underscores", () => {
