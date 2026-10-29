@@ -374,6 +374,15 @@
 
   /* ------------------------------- CSV ----------------------------------- */
 
+  // Same set as JavaScript \s. A RegExp test on every character of a large
+  // CSV dominates the preflight that exists to reject wide files early.
+  function isCsvSpace(ch) {
+    const c = ch.charCodeAt(0);
+    return c === 0x09 || c === 0x0a || c === 0x0b || c === 0x0c || c === 0x0d || c === 0x20
+      || c === 0xa0 || c === 0x1680 || c === 0xfeff
+      || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000;
+  }
+
   function exactCoordinate(value, label) {
     const text = String(value == null ? "" : value).trim();
     if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) throw new Error(label + " must be a complete numeric value.");
@@ -406,7 +415,7 @@
           if (text[i + 1] === '"') { i++; length++; }
           else quoted = false;
         } else length++;
-        if (!/\s/.test(ch) && ch !== '"') nonempty = true;
+        if (!isCsvSpace(ch) && ch !== '"') nonempty = true;
       } else if (ch === delimiter) {
         if (++width > LIMITS.propertiesPerFeature) throw new Error("CSV has more than " + LIMITS.propertiesPerFeature + " columns.");
         length = 0; atStart = true;
@@ -417,7 +426,7 @@
         quoted = true; atStart = false;
       } else {
         atStart = false; length++;
-        if (!/\s/.test(ch)) nonempty = true;
+        if (!isCsvSpace(ch)) nonempty = true;
       }
       if (length > LIMITS.propertyString) throw new Error("A CSV value exceeds the 100,000 character limit.");
     }
