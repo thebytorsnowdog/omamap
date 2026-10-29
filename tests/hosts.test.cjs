@@ -64,6 +64,21 @@ test("every basemap host is in the page CSP, the header CSP and the native allow
     assert.doesNotMatch(h, allowed, h + " is blocked");
 });
 
+test("the host's opened-file byte caps match the parser limits", () => {
+  const scheme = read("host/scheme.cpp");
+  const limits = read("core/parse.js");
+  // fileBytes: 100 * 1024 * 1024    or    OpenedFileBytes = qint64(100) * 1024 * 1024
+  const mebi = (src, label) => {
+    const m = src.match(new RegExp(label + String.raw`(?::\s*| = qint64\()(\d+)\)?\s*\*\s*1024\s*\*\s*1024`));
+    assert.ok(m, label);
+    return Number(m[1]);
+  };
+  assert.equal(mebi(scheme, "OpenedFileBytes"), mebi(limits, "fileBytes"));
+  assert.equal(mebi(scheme, "OpenedZipBytes"), mebi(limits, "zipBytes"));
+  assert.match(scheme, /file->size\(\) > openedFileLimit\(target\)/);
+  assert.match(scheme, /\{"Content-Length", QByteArray::number\(file->size\(\)\)\}/);
+});
+
 test("the CSP header and meta tag are the same policy, plus frame-ancestors", () => {
   const meta = directives(metaPolicy()), header = directives(headerPolicy());
   assert.deepEqual(header.get("frame-ancestors"), ["'none'"]);
