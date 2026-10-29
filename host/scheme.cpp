@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QIODevice>
 #include <QMultiMap>
 #include <QRandomGenerator>
 #include <QRegularExpression>
@@ -11,6 +12,72 @@
 #include <QWebEngineUrlRequestInfo>
 #include <QWebEngineUrlRequestJob>
 #include <QWebEngineUrlScheme>
+
+namespace {
+// Keep in step with OmaParse.LIMITS.fileBytes and .zipBytes in core/parse.js.
+constexpr qint64 OpenedFileBytes = qint64(100) * 1024 * 1024;
+constexpr qint64 OpenedZipBytes = qint64(50) * 1024 * 1024;
+
+qint64 openedFileLimit(const QString &path)
+{
+    const QString ext = QFileInfo(path).suffix().toLower();
+    if (ext == QLatin1String("zip") || ext == QLatin1String("kmz")) return OpenedZipBytes;
+    return OpenedFileBytes;
+}
+
+// The response stops at the size observed when the file was opened. A later
+// append cannot make Chromium read more than that, because size() stays put
+// and readData will not pass it.
+class BoundedFile : public QIODevice
+{
+public:
+    explicit BoundedFile(const QString &path, QObject *parent)
+        : QIODevice(parent)
+        , m_file(path)
+    {
+    }
+
+    bool open(QIODevice::OpenMode mode) override
+    {
+        Q_UNUSED(mode);
+        if (isOpen()) return true;
+        if (!m_file.open(QIODevice::ReadOnly)) return false;
+        m_size = m_file.size();
+        return QIODevice::open(QIODevice::ReadOnly);
+    }
+
+    void close() override
+    {
+        m_file.close();
+        QIODevice::close();
+    }
+
+    qint64 size() const override { return m_size; }
+
+protected:
+    qint64 readData(char *data, qint64 maxSize) override
+    {
+        const qint64 pos = m_file.pos();
+        if (pos < 0) return -1;
+        if (pos >= m_size) return 0;
+        return m_file.read(data, qMin(maxSize, m_size - pos));
+    }
+
+    qint64 writeData(const char *, qint64) override { return -1; }
+
+    bool seek(qint64 pos) override
+    {
+        if (pos < 0 || pos > m_size) return false;
+        if (!m_file.seek(pos)) return false;
+        return QIODevice::seek(pos);
+    }
+
+private:
+    QFile m_file;
+    qint64 m_size = 0;
+};
+
+} // namespace
 
 const QByteArray SchemeHandler::ContentSecurityPolicy =
     "default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self'; "
@@ -91,9 +158,16 @@ void SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
             job->fail(QWebEngineUrlRequestJob::UrlNotFound);
             return;
         }
-        auto *file = new QFile(target, job);
+        auto *file = new BoundedFile(target, job);
         if (!file->open(QIODevice::ReadOnly)) {
             job->fail(QWebEngineUrlRequestJob::UrlNotFound);
+            return;
+        }
+        // The page also checks the size it was told at open. This is the
+        // check that still applies if the file was replaced since then.
+        if (file->size() < 0 || file->size() > openedFileLimit(target)) {
+            file->close();
+            job->fail(QWebEngineUrlRequestJob::RequestDenied);
             return;
         }
         // Single use: the page reads each opened file once, so a URL that
@@ -103,6 +177,7 @@ void SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
         job->setAdditionalResponseHeaders({
             {"Content-Security-Policy", "sandbox; default-src 'none'"},
             {"X-Content-Type-Options", "nosniff"},
+            {"Content-Length", QByteArray::number(file->size())},
         });
         job->reply("application/octet-stream", file);
         return;

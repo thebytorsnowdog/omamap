@@ -39,6 +39,25 @@ test('long local geometries are not scanned for every query', () => {
   assert.ok(want.length < 30);
 });
 
+test('construction yields and agrees with the finished index', () => {
+  const ring = [];
+  for (let i = 0; i < 9000; i++) ring.push([i / 100, (i % 50) / 10]);
+  ring.push(ring[0]);
+  const features = [
+    { geometry: { type: 'Polygon', coordinates: [ring] } },
+    { geometry: { type: 'GeometryCollection', geometries: [{ type: 'Point', coordinates: [0, 0] }] } }
+  ];
+  for (let i = 0; i < 600; i++) features.push({ geometry: { type: 'Point', coordinates: [i / 10, 1] } });
+  const steps = SpatialIndex.steps(features);
+  let yields = 0;
+  let step = steps.next();
+  while (!step.done) { yields++; step = steps.next(); }
+  assert.ok(yields > 1, 'long rings and feature batches both yield');
+  const direct = new SpatialIndex(features);
+  assert.deepEqual(step.value.search(-1, -1, 2, 2), direct.search(-1, -1, 2, 2));
+  assert.ok(step.value instanceof SpatialIndex);
+});
+
 test('coincident points and nested geometries are searchable at boundaries', () => {
   const index=new SpatialIndex([{geometry:{type:'GeometryCollection',geometries:[{type:'Point',coordinates:[0,0]}]}},{geometry:{type:'Point',coordinates:[0,0]}}]);
   assert.deepEqual(index.search(0,0,0,0),[1,0]);

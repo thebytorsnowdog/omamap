@@ -223,6 +223,17 @@ test("method-name entry ZIP still imports", async () => {
   assert.equal(layers[0].geojson.features.length, 1);
 });
 
+test("a ZIP entry that declares more output than the expansion budget is rejected", () => {
+  const zip = Buffer.from(makeZip({ "layer.geojson": POINT_FC }));
+  const declared = 300 * 1024 * 1024;
+  zip.writeUInt32LE(declared, 22);
+  const central = zip.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  assert.ok(central > 0);
+  zip.writeUInt32LE(declared, central + 24);
+  const view = zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength);
+  assert.throws(() => P.extractZip(view), /expands beyond/);
+});
+
 test("hostile ZIPs are rejected", async () => {
   await assert.rejects(P.parseBytes("bomb.zip", fixture("expanded.zip")), /ratio|expands|limit/i);
   await assert.rejects(P.parseBytes("cd.zip", fixture("central-directory-disagreement.zip")), /overlap|disagree|unlisted/i);
@@ -566,6 +577,26 @@ test("CSV preflight handles other delimiters, escaped quotes and CRLF", () => {
     const fc = P.csvToGeoJSON(['lat','lon','note'].join(sep) + '\r\n' + ['1','2','"a\r\nb""c"'].join(sep));
     assert.equal(fc.features[0].properties.note, 'a\r\nb"c');
   }
+});
+
+test("CSV preflight uses the same whitespace set as JavaScript \\s", () => {
+  const spaces = [];
+  for (let c = 0; c <= 0xffff; c++) if (/\s/.test(String.fromCharCode(c))) spaces.push(c);
+  assert.deepEqual(spaces, [0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0xa0, 0x1680,
+    0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a,
+    0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff]);
+  for (const c of spaces) {
+    if (c === 0x0a || c === 0x0d) continue; // unquoted, these end the record
+    const ch = String.fromCharCode(c);
+    const label = "U+" + c.toString(16);
+    assert.throws(() => P.csvToGeoJSON("lat,lon\n" + ch + "," + ch + "\n"), /no data rows/, label);
+    assert.throws(() => P.csvToGeoJSON('lat,lon\n"' + ch + '","' + ch + '"\n'), /no data rows/, "quoted " + label);
+  }
+  assert.throws(() => P.csvToGeoJSON('lat,lon\n"\n","\n"\n'), /no data rows/);
+  const kept = P.csvToGeoJSON("name,lat,lon\n\u0085,1,2\n");
+  assert.equal(kept.features[0].properties.name, "\u0085");
+  const ogham = P.csvToGeoJSON("name,lat,lon\n\u180e,1,2\n");
+  assert.equal(ogham.features[0].properties.name, "\u180e");
 });
 
 test("validation returns fields first appearing after row 5000", () => {
