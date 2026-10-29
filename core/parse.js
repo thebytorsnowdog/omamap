@@ -673,16 +673,24 @@
     let expanded = 0;
     entries.forEach(function (entry) {
       const retain = !entry.name.split("/").includes("__macosx") && /\.(shp|dbf|prj|cpg|json|geojson|kml|gpx|csv)$/.test(entry.name);
-      const chunks = [];
-      let actual = 0, crc = 0xffffffff, finished = false;
+      // The declared size is the size a valid entry will actually produce.
+      // Reject it before allocating, so a header that claims gigabytes cannot
+      // reserve that buffer. Retained bytes are copied once into that buffer.
+      // fflate may reuse the chunk it passes to accept, so the copy has to
+      // happen before the next push.
+      const ratioCap = Math.max(1024 * 1024, bytes.length * LIMITS.zipRatio);
+      if (expanded + entry.expanded > LIMITS.expandedZipBytes) throw new Error("ZIP expands beyond the " + Math.round(LIMITS.expandedZipBytes / 1048576) + " MiB limit.");
+      if (expanded + entry.expanded > ratioCap) throw new Error("ZIP compression ratio exceeds the safety limit.");
+      const output = retain ? new Uint8Array(entry.expanded) : null;
+      let actual = 0, written = 0, crc = 0xffffffff, finished = false;
       function accept(data, final) {
         actual += data.length;
         expanded += data.length;
         if (expanded > LIMITS.expandedZipBytes) throw new Error("ZIP expands beyond the " + Math.round(LIMITS.expandedZipBytes / 1048576) + " MiB limit.");
-        if (expanded > Math.max(1024 * 1024, bytes.length * LIMITS.zipRatio)) throw new Error("ZIP compression ratio exceeds the safety limit.");
+        if (expanded > ratioCap) throw new Error("ZIP compression ratio exceeds the safety limit.");
         if (actual > entry.expanded) throw new Error("ZIP actual expansion disagrees with its entry size.");
         for (let index = 0; index < data.length; index++) crc = (crc >>> 8) ^ table[(crc ^ data[index]) & 255];
-        if (retain) chunks.push(data.slice());
+        if (output) { output.set(data, written); written += data.length; }
         if (final) finished = true;
       }
       const inflater = entry.method === 8 ? new root.fflate.Inflate(accept) : null;
@@ -694,14 +702,9 @@
         else accept(chunk, end === entry.compressed);
       }
       if (!entry.compressed && entry.method === 0) accept(new Uint8Array(0), true);
-      if (!finished || actual !== entry.expanded) throw new Error("ZIP entry is truncated or its actual expansion disagrees.");
+      if (!finished || actual !== entry.expanded || written !== (output ? actual : 0)) throw new Error("ZIP entry is truncated or its actual expansion disagrees.");
       if (((crc ^ 0xffffffff) >>> 0) !== entry.crc) throw new Error("ZIP entry checksum disagrees with its extracted bytes.");
-      if (retain) {
-        const output = new Uint8Array(actual);
-        let offset = 0;
-        chunks.forEach(function (chunk) { output.set(chunk, offset); offset += chunk.length; });
-        extracted.set(entry.name, output);
-      }
+      if (output) extracted.set(entry.name, output);
     });
     return extracted;
   }
