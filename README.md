@@ -142,7 +142,7 @@ Viewed tiles are kept in an ordinary HTTP cache (`~/.cache/omamap`, up to 512 Mi
 
 There is no telemetry, crash reporting or update check. Links in your data (`http`/`https` only) open in your browser when you click them.
 
-See [SECURITY.md](SECURITY.md) for the threat model, what OmaMap defends against, its known limits, and how to report a vulnerability. The latest repository audit is recorded in [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md).
+See [SECURITY.md](SECURITY.md) for the threat model, what OmaMap defends against, its known limits, and how to report a vulnerability. The 29 October 2026 audit is [docs/AUDIT.md](docs/AUDIT.md). The 3 October 2026 review is [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md).
 
 ### Map data terms
 
