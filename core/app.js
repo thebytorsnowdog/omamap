@@ -335,6 +335,7 @@ function* prepareDataset(parsed, base) {
       layer.dispose = function () { fast.dispose(); STATE.map.removeLayer(layer); };
     }
   }
+  const spatial = yield* SpatialIndex.steps(geojson.features);
   const ds = {
     id: "ds-" + (STATE.nextId++),
     name: String(parsed.name || "Untitled").slice(0, 200),
@@ -343,7 +344,7 @@ function* prepareDataset(parsed, base) {
     features: geojson.features,
     geojson: geojson,
     fields: geojson.fields,
-    spatial: new SpatialIndex(geojson.features),
+    spatial: spatial,
     layers: layers,           // per feature, in file order
     featureCount: geojson.features.length,
     geomTypes: geometrySummary(geojson),

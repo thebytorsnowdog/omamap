@@ -223,6 +223,17 @@ test("method-name entry ZIP still imports", async () => {
   assert.equal(layers[0].geojson.features.length, 1);
 });
 
+test("a ZIP entry that declares more output than the expansion budget is rejected", () => {
+  const zip = Buffer.from(makeZip({ "layer.geojson": POINT_FC }));
+  const declared = 300 * 1024 * 1024;
+  zip.writeUInt32LE(declared, 22);
+  const central = zip.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  assert.ok(central > 0);
+  zip.writeUInt32LE(declared, central + 24);
+  const view = zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength);
+  assert.throws(() => P.extractZip(view), /expands beyond/);
+});
+
 test("hostile ZIPs are rejected", async () => {
   await assert.rejects(P.parseBytes("bomb.zip", fixture("expanded.zip")), /ratio|expands|limit/i);
   await assert.rejects(P.parseBytes("cd.zip", fixture("central-directory-disagreement.zip")), /overlap|disagree|unlisted/i);
