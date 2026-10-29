@@ -147,7 +147,7 @@ For setup failures, check the missing prerequisite first: CMake reports the requ
 * Packaged builds must not trust a build-tree core. The host additionally checks ownership and write permissions of the core directory and the entries it can serve; `OMAMAP_CORE_DIR` is an explicit trust override.
 * Vendored browser assets are part of the application attack surface. Update their inventory, licences and `SHA256SUMS` together.
 
-`SECURITY.md` is the user-facing threat model. `docs/SECURITY-REVIEW.md` records the latest repository review and its residual findings.
+`SECURITY.md` is the user-facing threat model. [AUDIT.md](AUDIT.md) is the 29 October 2026 audit. [SECURITY-REVIEW.md](SECURITY-REVIEW.md) is the 3 October 2026 review.
 
 ## Rough edges and maintenance notes
 
@@ -164,4 +164,4 @@ For setup failures, check the missing prerequisite first: CMake reports the requ
 * Separate point and vector canvases constrain stacking across mixed datasets. Translucent coincident points can also composite differently in Canvas and WebGL; addressing these differences needs rendering and performance decisions.
 * The application has no end-user basemap configuration. Adding a provider requires coordinated code, policy, attribution, privacy and terms-of-use changes.
 * Performance tests use generated data and wall-clock timings, so they are diagnostic benchmarks rather than deterministic CI gates.
-* The installed Qt/WebEngine version is supplied by the OS, and `npm audit` covers only development tools. Shipped browser libraries need their separate inventory/advisory check; some dependencies embedded in `shpjs` do not publish exact versions. See the current [security review](SECURITY-REVIEW.md) for confirmed findings and audit limits.
+* The installed Qt/WebEngine version is supplied by the OS, and `npm audit` covers only development tools. Shipped browser libraries need their separate inventory/advisory check; some dependencies embedded in `shpjs` do not publish exact versions. See [AUDIT.md](AUDIT.md) for the 29 October 2026 pass and [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the 3 October 2026 review.
