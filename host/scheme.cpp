@@ -1,8 +1,11 @@
 #include "scheme.h"
 
+#include "regular_file.h"
+
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
+#include <QFileDevice>
 #include <QFileInfo>
 #include <QIODevice>
 #include <QMultiMap>
@@ -12,6 +15,7 @@
 #include <QWebEngineUrlRequestInfo>
 #include <QWebEngineUrlRequestJob>
 #include <QWebEngineUrlScheme>
+#include <unistd.h>
 
 namespace {
 // Keep in step with OmaParse.LIMITS.fileBytes and .zipBytes in core/parse.js.
@@ -25,25 +29,23 @@ qint64 openedFileLimit(const QString &path)
     return OpenedFileBytes;
 }
 
-// The response stops at the size observed when the file was opened. A later
-// append cannot make Chromium read more than that, because size() stays put
-// and readData will not pass it.
+// The response stops at the size of the inode captured when it was opened.
+// A later append cannot make Chromium read more than that, because size()
+// stays put and readData will not pass it. fd is adopted on success.
 class BoundedFile : public QIODevice
 {
 public:
-    explicit BoundedFile(const QString &path, QObject *parent)
+    BoundedFile(int fd, qint64 size, QObject *parent)
         : QIODevice(parent)
-        , m_file(path)
+        , m_size(size)
     {
-    }
-
-    bool open(QIODevice::OpenMode mode) override
-    {
-        Q_UNUSED(mode);
-        if (isOpen()) return true;
-        if (!m_file.open(QIODevice::ReadOnly)) return false;
-        m_size = m_file.size();
-        return QIODevice::open(QIODevice::ReadOnly);
+        // QFile closes fd on success when AutoCloseHandle is set. On failure
+        // the descriptor is still ours.
+        if (!m_file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) {
+            ::close(fd);
+            return;
+        }
+        QIODevice::open(QIODevice::ReadOnly);
     }
 
     void close() override
@@ -152,14 +154,17 @@ void SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
             job->fail(QWebEngineUrlRequestJob::RequestDenied);
             return;
         }
-        // Still a regular file: a FIFO or device swapped in since it was
-        // opened would block or never end.
-        if (target.isEmpty() || !QFileInfo(target).isFile()) {
+        // Open the inode itself. A path check followed by a later open is a
+        // race: another local user who can replace the directory entry can
+        // put a FIFO there, and QFile::open would block the UI thread.
+        const QByteArray native = QFile::encodeName(target);
+        RegularFile opened{};
+        if (target.isEmpty() || !openRegularFile(native.constData(), &opened)) {
             job->fail(QWebEngineUrlRequestJob::UrlNotFound);
             return;
         }
-        auto *file = new BoundedFile(target, job);
-        if (!file->open(QIODevice::ReadOnly)) {
+        auto *file = new BoundedFile(static_cast<int>(opened.fd), static_cast<qint64>(opened.size), job);
+        if (!file->isOpen()) {
             job->fail(QWebEngineUrlRequestJob::UrlNotFound);
             return;
         }

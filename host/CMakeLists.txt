@@ -20,6 +20,7 @@ add_executable(omamap
   profile_save.cpp profile_save.h
   recent.cpp recent.h
   scheme.cpp scheme.h
+  regular_file.cpp regular_file.h
   theme.cpp theme.h
   trusted_core.cpp trusted_core.h
   window.cpp window.h
@@ -55,6 +56,9 @@ if(BUILD_TESTING)
   target_include_directories(ipc-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(ipc-test PRIVATE Qt6::Core)
   add_test(NAME ipc COMMAND ipc-test)
+  add_executable(regular-file-test ../tests/regular-file.cpp regular_file.cpp)
+  target_include_directories(regular-file-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME regular-file COMMAND regular-file-test)
 endif()
 
 install(TARGETS omamap RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
