@@ -10,6 +10,9 @@
     "test:browser": "node tests/browser.cjs && node tests/features.cjs && node tests/security.cjs",
     "serve": "python3 -m http.server 8765 --bind 127.0.0.1 --directory core"
   },
+  "overrides": {
+    "minimatch": "11.0.5"
+  },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "eslint": "10.14.0",
