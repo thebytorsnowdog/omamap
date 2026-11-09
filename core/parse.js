@@ -3,9 +3,9 @@
    OmaMap parsing and validation.
 
    Ported from WIMP 1.1.0's reviewed import paths. Runs in the parse worker
-   (parse-worker.js) and, for KML/GPX which need DOMParser, on the main thread.
-   Depends on globals provided by the vendored UMD builds: Papa, shp, fflate,
-   and (main thread only) toGeoJSON.
+   (parse-worker.js). KML and GPX are scanned here too: Chromium workers have
+   no DOMParser, and DOMParser.parseFromString cannot yield. Depends on
+   globals provided by the vendored UMD builds: Papa, shp and fflate.
 --------------------------------------------------------------------------- */
 (function (root) {
 
@@ -28,7 +28,11 @@
     workspaceCoordinates: 10000000,
     layersPerFile: 50,                  // datasets from one ZIP or profile
     featuresPerFile: 1000000,           // all layers of one ZIP together
-    arrayNesting: 4                     // GeoJSON given as nested arrays of layers
+    arrayNesting: 4,                    // GeoJSON given as nested arrays of layers
+    xmlDepth: 64,                       // elements open at once in one KML or GPX file
+    xmlElements: 6000000,               // tags in one KML or GPX file
+    xmlAttributes: 64,                  // attributes on one tag
+    xmlNames: 4096                      // distinct tag names in one KML or GPX file
   });
 
   const FORBIDDEN_PROPERTY_NAMES = ["__proto__", "prototype", "constructor"];
@@ -508,7 +512,19 @@
   }
 
   /* --------------------------- KML / GPX --------------------------------- */
-  // Main thread only: needs DOMParser and toGeoJSON.
+  // Scanned in slices. DOMParser.parseFromString cannot yield, and a worker
+  // has no DOMParser, so one large track froze the window for the whole parse.
+  // Entity references are decoded once and never substituted from a DTD.
+
+  const XML_SLICE = 64 * 1024;
+  const XML_NAME_LENGTH = 200;
+  const KML_TEXT = { name: 1, address: 1, visibility: 1, open: 1, phoneNumber: 1, description: 1 };
+  const GPX_TEXT = { name: 1, cmt: 1, desc: 1, type: 1, time: 1, keywords: 1, sym: 1 };
+  const XML_TEXT = {
+    name: 1, address: 1, visibility: 1, open: 1, phoneNumber: 1, description: 1,
+    cmt: 1, desc: 1, type: 1, time: 1, keywords: 1, sym: 1, ele: 1, styleUrl: 1,
+    color: 1, width: 1, fill: 1, outline: 1, begin: 1, end: 1, when: 1, value: 1
+  };
 
   function countMatches(text, pattern) {
     let n = 0;
@@ -517,34 +533,817 @@
     return n;
   }
 
-  /* Cheap checks that need no DOM, so they also run in the worker for KML
-     and GPX found inside a ZIP. Returns the number of feature elements. */
+  function isXmlSpace(code) {
+    return code === 32 || code === 9 || code === 10 || code === 13;
+  }
+
+  function isXmlNameChar(code) {
+    return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) ||
+      code === 95 || code === 58 || code === 45 || code === 46 || code > 127;
+  }
+
+  function hashXmlId(id) {
+    if (!id) return "#";
+    return id.charAt(0) === "#" ? id : "#" + id;
+  }
+
+  /* KML colours are aabbggrr. Stroke and fill keep those names; other roles
+     become role-color, matching the properties already shown in the table. */
+  function kmlColour(raw, role) {
+    const out = {};
+    if (!raw) return out;
+    let hex = String(raw).trim();
+    const key = role === "stroke" || role === "fill" ? role : role + "-color";
+    if (hex.charAt(0) === "#") hex = hex.slice(1);
+    if (hex.length === 6 || hex.length === 3) out[key] = "#" + hex;
+    else if (hex.length === 8) {
+      const opacity = parseInt(hex.slice(0, 2), 16);
+      if (Number.isFinite(opacity)) out[role + "-opacity"] = opacity / 255;
+      out[key] = "#" + hex.slice(6, 8) + hex.slice(4, 6) + hex.slice(2, 4);
+    }
+    return out;
+  }
+
+  function closeXmlRing(ring) {
+    if (ring.length < 4) return null;
+    const first = ring[0], last = ring[ring.length - 1];
+    let same = first.length === last.length;
+    for (let i = 0; same && i < first.length; i++) if (first[i] !== last[i]) same = false;
+    if (!same) ring.push(first.slice());
+    return ring.length >= 4 ? ring : null;
+  }
+
+  /* Cheap checks that need no geometry, so they also run in the worker for
+     KML and GPX found inside a ZIP. Returns the number of feature elements. */
   function precheckXml(text, ext) {
     if (/<!DOCTYPE|<!ENTITY/i.test(String(text))) throw new Error("XML with a DOCTYPE or ENTITY declaration is not accepted.");
-    // Refuse files with too many features before building a DOM for them (a
-    // 100 MiB KML of placemarks froze the window for about a minute, only to
-    // be refused).
+    // Count features before the scan. A 100 MiB KML of placemarks used to
+    // reach the DOM and freeze the window for about a minute.
     const items = ext === "kml" ? countMatches(text, /<(?:\w+:)?Placemark[\s>]/g) : countMatches(text, /<(?:\w+:)?(?:wpt|trk|rte)[\s>]/g);
     if (items > LIMITS.features) throw new Error("File has more than " + LIMITS.features.toLocaleString() + (ext === "kml" ? " placemarks." : " waypoints, tracks and routes."));
     return items;
   }
 
-  /* KML / GPX to a validated FeatureCollection, as a generator that yields
-     between features: the caller can spread the conversion over several
-     frames and stop it (Cancel). Only DOMParser itself runs in one piece. */
+  /* One pass over the XML text. Yields often enough that a slice stays short
+     even when one element holds millions of coordinates. Custom entities are
+     refused; the five predefined entities and numeric character references
+     are decoded a single time. */
+  function* buildXmlFeatures(text, ext) {
+    const src = String(text);
+    const end = src.length;
+    const invalid = function () { return new Error("File is not valid " + ext.toUpperCase() + " XML."); };
+    const names = [];
+    const namePool = new Map();
+    const textStack = [];
+    const geomStack = [];
+    const pmStack = [];
+    const styleStack = [];
+    const pending = [];
+    const trks = [], rtes = [], wpts = [];
+    const styles = {};
+    const styleMaps = [];
+    const counter = { count: 0 };
+    let i = src.charCodeAt(0) === 0xfeff ? 1 : 0;
+    let elements = 0;
+    let nextYield = i + XML_SLICE;
+    let rooted = false;
+    let coordMode = null;
+    let pm = null;
+    let styleFrame = null;
+    let paint = null;
+    let dataEl = null;
+    let gpxCur = null;
+    let pt = null;
+
+    function intern(name) {
+      const hit = namePool.get(name);
+      if (hit) return hit;
+      if (namePool.size >= LIMITS.xmlNames) throw new Error("File has too many distinct XML names.");
+      namePool.set(name, name);
+      return name;
+    }
+
+    function localOf(name) {
+      const colon = name.lastIndexOf(":");
+      return colon >= 0 ? name.slice(colon + 1) : name;
+    }
+
+    function addCoord(n) {
+      counter.count += n;
+      if (counter.count > LIMITS.coordinates) throw new Error("Dataset exceeds the " + LIMITS.coordinates.toLocaleString() + " coordinate limit.");
+    }
+
+    function freshGeomBucket() {
+      return { points: [], lines: [], polys: [], tracks: [], trackTimes: [] };
+    }
+
+    function bucket() {
+      if (!pm) return null;
+      if (pm.multiDepth > 0) return pm.multiFrozen ? null : pm.multi;
+      return pm.multi ? null : pm;
+    }
+
+    function readNumber(at) {
+      let c = src.charCodeAt(at);
+      if (c !== 45 && c !== 43 && c !== 46 && (c < 48 || c > 57)) return null;
+      const start = at;
+      let sign = 1;
+      if (c === 45) { sign = -1; at++; }
+      else if (c === 43) at++;
+      let intPart = 0, digits = 0, frac = 0, scale = 1, fracDigits = 0;
+      while (at < end) {
+        c = src.charCodeAt(at);
+        if (c < 48 || c > 57) break;
+        if (digits < 15) intPart = intPart * 10 + (c - 48);
+        digits++;
+        at++;
+      }
+      if (at < end && src.charCodeAt(at) === 46) {
+        at++;
+        while (at < end) {
+          c = src.charCodeAt(at);
+          if (c < 48 || c > 57) break;
+          if (fracDigits < 15) { frac = frac * 10 + (c - 48); scale *= 10; }
+          fracDigits++;
+          at++;
+        }
+      }
+      if (!digits && !fracDigits) return null;
+      if (at < end && (src.charCodeAt(at) === 101 || src.charCodeAt(at) === 69)) {
+        let j = at + 1;
+        if (j < end && (src.charCodeAt(j) === 43 || src.charCodeAt(j) === 45)) j++;
+        const expAt = j;
+        while (j < end && src.charCodeAt(j) >= 48 && src.charCodeAt(j) <= 57) j++;
+        if (j === expAt) return null;
+        const n = Number(src.slice(start, j));
+        return Number.isFinite(n) ? { n: n, i: j } : null;
+      }
+      return { n: sign * (intPart + (scale > 1 ? frac / scale : 0)), i: at };
+    }
+
+    function readEntity(at) {
+      if (src.charCodeAt(at) !== 38) return null;
+      const semi = src.indexOf(";", at + 1);
+      if (semi < 0 || semi >= end || semi - at > 32) return null;
+      const body = src.slice(at + 1, semi);
+      let value;
+      if (body === "lt") value = "<";
+      else if (body === "gt") value = ">";
+      else if (body === "amp") value = "&";
+      else if (body === "quot") value = "\"";
+      else if (body === "apos") value = "'";
+      else if (body.charAt(0) === "#") {
+        const hex = body.charAt(1) === "x" || body.charAt(1) === "X";
+        const cp = hex ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+        if (!Number.isInteger(cp) || cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return null;
+        value = String.fromCodePoint(cp);
+      } else throw new Error("XML entity references are not accepted.");
+      return { value: value, i: semi + 1 };
+    }
+
+    function appendChunk(item, chunk) {
+      if (!chunk) return;
+      if (item.n + chunk.length > LIMITS.propertyString) throw new Error("A property value exceeds the 100,000 character limit.");
+      item.parts.push(chunk);
+      item.n += chunk.length;
+    }
+
+    function appendRange(item, from, to) {
+      const amp = src.indexOf("&", from);
+      if (amp < 0 || amp >= to) { appendChunk(item, src.slice(from, to)); return; }
+      let at = from;
+      while (at < to) {
+        const next = src.indexOf("&", at);
+        if (next < 0 || next >= to) { appendChunk(item, src.slice(at, to)); break; }
+        if (next > at) appendChunk(item, src.slice(at, next));
+        const entity = readEntity(next);
+        if (!entity || entity.i > to) throw invalid();
+        appendChunk(item, entity.value);
+        at = entity.i;
+      }
+    }
+
+    function joinText(item) {
+      const value = item.parts.length === 1 ? item.parts[0] : item.parts.join("");
+      return value.normalize("NFC");
+    }
+
+    function* skipTo(marker, from) {
+      let pos = from;
+      while (pos < end) {
+        if (pos >= nextYield) { nextYield = pos + XML_SLICE; yield; }
+        const found = src.indexOf(marker, pos);
+        if (found < 0) throw invalid();
+        if (found - pos > XML_SLICE) { pos += XML_SLICE; continue; }
+        return found + marker.length;
+      }
+      throw invalid();
+    }
+
+    function* readAttrs(from, needed) {
+      const found = {};
+      let at = from, count = 0;
+      while (at < end) {
+        if (at >= nextYield) { nextYield = at + XML_SLICE; yield; }
+        let c = src.charCodeAt(at);
+        if (c === 62) return { i: at + 1, empty: false, found: found };
+        if (c === 47 && src.charCodeAt(at + 1) === 62) return { i: at + 2, empty: true, found: found };
+        if (!isXmlSpace(c)) throw invalid();
+        while (at < end && isXmlSpace(src.charCodeAt(at))) at++;
+        c = src.charCodeAt(at);
+        if (c === 62 || c === 47) continue;
+        const nameAt = at;
+        while (at < end && isXmlNameChar(src.charCodeAt(at))) at++;
+        if (at === nameAt || at - nameAt > XML_NAME_LENGTH) throw invalid();
+        const attr = src.slice(nameAt, at);
+        while (at < end && isXmlSpace(src.charCodeAt(at))) at++;
+        if (src.charCodeAt(at) !== 61) throw invalid();
+        at++;
+        while (at < end && isXmlSpace(src.charCodeAt(at))) at++;
+        const quote = src.charCodeAt(at);
+        if (quote !== 34 && quote !== 39) throw invalid();
+        at++;
+        const valueAt = at;
+        while (at < end && src.charCodeAt(at) !== quote) {
+          if (src.charCodeAt(at) === 38) {
+            const entity = readEntity(at);
+            if (!entity) throw invalid();
+            at = entity.i;
+            continue;
+          }
+          if (src.charCodeAt(at) === 60 || src.charCodeAt(at) === 0) throw invalid();
+          at++;
+          if (at >= nextYield) { nextYield = at + XML_SLICE; yield; }
+        }
+        if (at >= end) throw invalid();
+        if (++count > LIMITS.xmlAttributes) throw new Error("An XML element has too many attributes.");
+        if (needed && needed.indexOf(attr) >= 0) {
+          const rawLength = at - valueAt;
+          if (rawLength > LIMITS.propertyString) throw new Error("A property value exceeds the 100,000 character limit.");
+          const item = { parts: [], n: 0 };
+          appendRange(item, valueAt, at);
+          found[attr] = joinText(item);
+        }
+        at++;
+      }
+      throw invalid();
+    }
+
+    function readName(from) {
+      const nameAt = from;
+      let at = from;
+      while (at < end && isXmlNameChar(src.charCodeAt(at))) at++;
+      if (at === nameAt || at - nameAt > XML_NAME_LENGTH) throw invalid();
+      return { name: intern(src.slice(nameAt, at)), i: at };
+    }
+
+    function gpxPoint(attrs) {
+      const lat = Number(attrs.lat), lon = Number(attrs.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+      return { coord: [lon, lat], time: null };
+    }
+
+    function gpxProps(kind, raw) {
+      const props = kind ? { _gpxType: kind } : {};
+      const fields = ["name", "cmt", "desc", "type", "time", "keywords", "sym"];
+      for (let f = 0; f < fields.length; f++) if (raw[fields[f]]) props[fields[f]] = raw[fields[f]];
+      return props;
+    }
+
+    function openMulti() {
+      if (!pm.multiFrozen) pm.multi = freshGeomBucket();
+      pm.multiDepth++;
+    }
+
+    function finishPaint() {
+      if (!paint) return;
+      const role = paint.kind === "line" ? "stroke" : "fill";
+      const bag = kmlColour(paint.color, role);
+      if (paint.kind === "line" && paint.width !== "") {
+        const width = Number(paint.width);
+        if (Number.isFinite(width) && width !== 0) bag["stroke-width"] = width;
+      }
+      if (paint.kind === "poly") {
+        if (paint.fill === "0") bag["fill-opacity"] = 0;
+        if (paint.outline === "0") bag["stroke-opacity"] = 0;
+      }
+      if (styleFrame && styleFrame.kind === "style") Object.assign(styleFrame.bag, bag);
+      if (pm && styleFrame && styleFrame.kind === "style" && pm.styleOwns === styleFrame) Object.assign(pm.inline, bag);
+      else if (pm && !styleFrame) Object.assign(pm.inline, bag);
+      paint = null;
+    }
+
+    function dispatchText(local, value) {
+      if (paint && (local === "color" || local === "width" || local === "fill" || local === "outline")) {
+        paint[local] = value.trim();
+        return;
+      }
+      if (local === "styleUrl") {
+        const url = value.trim();
+        if (styleFrame && styleFrame.kind === "map" && !styleFrame.url) styleFrame.url = url;
+        else if (pm && !pm.styleUrl) pm.styleUrl = url;
+        return;
+      }
+      if (local === "SimpleData" && dataEl) { dataEl.value = value; return; }
+      if (local === "value" && dataEl && !dataEl.simple) { dataEl.value = value; return; }
+      if (local === "when") {
+        const track = geomStack[geomStack.length - 1];
+        if (track && track.k === "track") track.whens.push(value);
+        else if (pm) pm.time.timestamp = value;
+        return;
+      }
+      if ((local === "begin" || local === "end") && pm) {
+        if (!pm.time.timespan) pm.time.timespan = { begin: "", end: "" };
+        pm.time.timespan[local] = value;
+        return;
+      }
+      if (local === "ele" && pt) {
+        const elevation = Number(value.trim());
+        // A zero elevation used to be dropped; keep that so sea level stays a 2D position.
+        if (Number.isFinite(elevation) && elevation !== 0) pt.coord.push(elevation);
+        return;
+      }
+      if (ext === "gpx" && local === "time" && pt && !pt.time) pt.time = value;
+      // First matching element in the feature, including a time inside the first point.
+      if (ext === "gpx" && gpxCur && GPX_TEXT[local] && gpxCur.props[local] == null && value !== "") gpxCur.props[local] = value;
+      else if (ext === "kml" && pm && KML_TEXT[local] && !styleFrame && pm.props[local] == null && value !== "") pm.props[local] = value;
+    }
+
+    function commitPoint() {
+      const frame = geomStack.pop();
+      if (!frame || frame.nums.length < 2) return;
+      if (frame.nums.length > 4) throw new Error("Coordinate positions need two to four numbers.");
+      const target = bucket();
+      if (!target) return;
+      target.points.push({ type: "Point", coordinates: frame.nums });
+      addCoord(1);
+    }
+
+    function commitLine() {
+      const frame = geomStack.pop();
+      if (!frame || frame.positions.length < 2) return;
+      const target = bucket();
+      if (!target) return;
+      target.lines.push({ type: "LineString", coordinates: frame.positions });
+    }
+
+    function commitRing() {
+      const frame = geomStack.pop();
+      const parent = geomStack[geomStack.length - 1];
+      if (!frame || !parent || parent.k !== "poly") return;
+      const before = frame.positions.length;
+      const ring = closeXmlRing(frame.positions);
+      if (!ring) return;
+      if (ring.length > before) addCoord(ring.length - before);
+      parent.rings.push(ring);
+    }
+
+    function commitPoly() {
+      const frame = geomStack.pop();
+      if (!frame || !frame.rings.length) return;
+      const target = bucket();
+      if (target) target.polys.push({ type: "Polygon", coordinates: frame.rings });
+    }
+
+    function commitTrack() {
+      const frame = geomStack.pop();
+      if (!frame || !frame.positions.length) return;
+      const target = bucket();
+      if (!target) return;
+      if (frame.positions.length > 2) target.tracks.push({ type: "LineString", coordinates: frame.positions });
+      else target.points.push({ type: "Point", coordinates: frame.positions[0] });
+      if (frame.whens.length) target.trackTimes.push(frame.whens);
+    }
+
+    function commitCoord() {
+      const frame = geomStack[geomStack.length - 1];
+      if (!coordMode || coordMode.k !== "spaced" || !frame || frame.k !== "track") { coordMode = null; return; }
+      const nums = coordMode.buf;
+      coordMode = null;
+      if (nums.length < 2) return;
+      if (nums.length > 4) throw new Error("Coordinate positions need two to four numbers.");
+      frame.positions.push(nums);
+      addCoord(1);
+    }
+
+    function finishGpxTrack() {
+      const lines = [], times = [];
+      for (let s = 0; s < gpxCur.segs.length; s++) {
+        const seg = gpxCur.segs[s];
+        if (seg.coords.length < 2) continue;
+        lines.push(seg.coords);
+        if (seg.times.length) times.push(seg.times);
+      }
+      if (!lines.length) return;
+      const props = gpxProps("trk", gpxCur.props);
+      if (times.length) props.coordinateProperties = { times: lines.length > 1 ? times : times[0] };
+      const geometry = lines.length === 1 ? { type: "LineString", coordinates: lines[0] } : { type: "MultiLineString", coordinates: lines };
+      trks.push({ type: "Feature", properties: props, geometry: geometry });
+    }
+
+    function orderedStyle(bag) {
+      const out = {};
+      const keys = ["fill-opacity", "fill", "stroke-opacity", "stroke", "stroke-width"];
+      for (let k = 0; k < keys.length; k++) if (bag[keys[k]] != null) out[keys[k]] = bag[keys[k]];
+      const rest = Object.keys(bag);
+      for (let k = 0; k < rest.length; k++) if (out[rest[k]] == null) out[rest[k]] = bag[rest[k]];
+      return out;
+    }
+
+    function materialise(mark) {
+      const source = mark.multi || mark;
+      const geoms = source.polys.concat(source.lines, source.points, source.tracks);
+      if (!geoms.length) return null;
+      const properties = {};
+      const propOrder = ["name", "address", "visibility", "open", "phoneNumber", "description"];
+      for (let k = 0; k < propOrder.length; k++) if (mark.props[propOrder[k]]) properties[propOrder[k]] = mark.props[propOrder[k]];
+      if (mark.styleUrl) {
+        const key = hashXmlId(mark.styleUrl);
+        const mapped = styles[key];
+        if (mapped) Object.assign(properties, { styleUrl: key }, orderedStyle(mapped));
+        else properties.styleUrl = key;
+      }
+      Object.assign(properties, orderedStyle(mark.inline), mark.extended, mark.time);
+      if (source.trackTimes.length) properties.coordinateProperties = { times: source.trackTimes.length === 1 ? source.trackTimes[0] : source.trackTimes };
+      const feature = {
+        type: "Feature",
+        geometry: geoms.length === 1 ? geoms[0] : { type: "GeometryCollection", geometries: geoms },
+        properties: properties
+      };
+      if (mark.id) feature.id = mark.id;
+      return feature;
+    }
+
+    function* readTuples(from, stop, into) {
+      let at = from;
+      while (at < stop) {
+        if (at >= nextYield) { nextYield = at + XML_SLICE; yield; }
+        let c = src.charCodeAt(at);
+        if (isXmlSpace(c)) { at++; continue; }
+        const position = [];
+        while (at < stop && !isXmlSpace(src.charCodeAt(at))) {
+          if (src.charCodeAt(at) === 44) { at++; continue; }
+          const num = readNumber(at);
+          if (!num || num.i > stop) break;
+          position.push(num.n);
+          at = num.i;
+        }
+        if (position.length > 4) throw new Error("Coordinate positions need two to four numbers.");
+        if (position.length >= 2) { into.push(position); addCoord(1); }
+        if (at < stop && !isXmlSpace(src.charCodeAt(at))) at++;
+      }
+      return at;
+    }
+
+    function* readFlatNumbers(from, stop, into) {
+      let at = from;
+      while (at < stop) {
+        if (at >= nextYield) { nextYield = at + XML_SLICE; yield; }
+        const c = src.charCodeAt(at);
+        if (isXmlSpace(c) || c === 44) { at++; continue; }
+        const num = readNumber(at);
+        if (!num || num.i > stop) { at++; continue; }
+        if (into.length >= 4) throw new Error("Coordinate positions need two to four numbers.");
+        into.push(num.n);
+        at = num.i;
+      }
+      return at;
+    }
+
+    /* Self-closing GPX points are the bulk of a large track. The general tag
+       parser is correct for them and far too slow; this only accepts an empty
+       tag and leaves anything with child elements on the slow path. */
+    function scanFastPoint(at) {
+      let kind, nameLen;
+      if (src.startsWith("<trkpt", at)) { kind = "trkpt"; nameLen = 6; }
+      else if (src.startsWith("<rtept", at)) { kind = "rtept"; nameLen = 6; }
+      else if (src.startsWith("<wpt", at)) { kind = "wpt"; nameLen = 4; }
+      else return null;
+      let j = at + nameLen;
+      const boundary = src.charCodeAt(j);
+      if (!isXmlSpace(boundary) && boundary !== 47) return null;
+      let lat = NaN, lon = NaN, attrs = 0;
+      while (j < end) {
+        while (j < end && isXmlSpace(src.charCodeAt(j))) j++;
+        if (src.charCodeAt(j) === 47 && src.charCodeAt(j + 1) === 62) {
+          if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+          return { i: j + 2, kind: kind, coord: [lon, lat] };
+        }
+        if (src.charCodeAt(j) === 62 || src.charCodeAt(j) === 60) return null;
+        const nameAt = j;
+        while (j < end && isXmlNameChar(src.charCodeAt(j))) j++;
+        if (j === nameAt || j - nameAt > XML_NAME_LENGTH) return null;
+        const attr = src.slice(nameAt, j);
+        while (j < end && isXmlSpace(src.charCodeAt(j))) j++;
+        if (src.charCodeAt(j) !== 61) return null;
+        j++;
+        while (j < end && isXmlSpace(src.charCodeAt(j))) j++;
+        const quote = src.charCodeAt(j);
+        if (quote !== 34 && quote !== 39) return null;
+        j++;
+        const valueAt = j;
+        while (j < end && src.charCodeAt(j) !== quote) {
+          if (src.charCodeAt(j) === 38 || src.charCodeAt(j) === 60 || src.charCodeAt(j) === 0) return null;
+          j++;
+        }
+        if (src.charCodeAt(j) !== quote) return null;
+        if (++attrs > LIMITS.xmlAttributes) throw new Error("An XML element has too many attributes.");
+        if (attr === "lat" || attr === "lon") {
+          const n = Number(src.slice(valueAt, j));
+          if (attr === "lat") lat = n; else lon = n;
+        }
+        j++;
+      }
+      return null;
+    }
+
+    function* readTuplesUntil(from, into) {
+      let at = from;
+      while (at < end && src.charCodeAt(at) !== 60) {
+        if (at >= nextYield) { nextYield = at + XML_SLICE; yield; }
+        if (isXmlSpace(src.charCodeAt(at))) { at++; continue; }
+        const position = [];
+        while (at < end && src.charCodeAt(at) !== 60 && !isXmlSpace(src.charCodeAt(at))) {
+          if (src.charCodeAt(at) === 44) { at++; continue; }
+          const num = readNumber(at);
+          if (!num) break;
+          position.push(num.n);
+          at = num.i;
+        }
+        if (position.length > 4) throw new Error("Coordinate positions need two to four numbers.");
+        if (position.length >= 2) { into.push(position); addCoord(1); }
+        if (at < end && src.charCodeAt(at) !== 60 && !isXmlSpace(src.charCodeAt(at))) at++;
+      }
+      return at;
+    }
+
+    function* readFlatUntil(from, into) {
+      let at = from;
+      while (at < end && src.charCodeAt(at) !== 60) {
+        if (at >= nextYield) { nextYield = at + XML_SLICE; yield; }
+        const c = src.charCodeAt(at);
+        if (isXmlSpace(c) || c === 44) { at++; continue; }
+        const num = readNumber(at);
+        if (!num) { at++; continue; }
+        if (into.length >= 4) throw new Error("Coordinate positions need two to four numbers.");
+        into.push(num.n);
+        at = num.i;
+      }
+      return at;
+    }
+
+    function* feedUntilTag(from) {
+      if (coordMode && (coordMode.k === "point" || coordMode.k === "spaced")) return yield* readFlatUntil(from, coordMode.buf);
+      if (coordMode) return yield* readTuplesUntil(from, coordMode.buf);
+      let at = from;
+      while (at < end && src.charCodeAt(at) !== 60) {
+        if (at >= nextYield) { nextYield = at + XML_SLICE; yield; }
+        let stop = Math.min(end, at + XML_SLICE);
+        const lt = src.indexOf("<", at);
+        if (lt >= 0 && lt < stop) stop = lt;
+        else if (lt < 0) stop = end;
+        const amp = src.lastIndexOf("&", stop - 1);
+        const semi = amp >= at ? src.indexOf(";", amp) : -1;
+        if (amp >= at && semi >= stop && semi - amp <= 32) stop = amp;
+        if (stop === at) stop = Math.min(end, at + 1);
+        if (textStack.length) appendRange(textStack[textStack.length - 1], at, stop);
+        at = stop;
+      }
+      return at;
+    }
+
+    function startTag(local, attrs) {
+      if (ext === "kml") {
+        if (local === "Placemark") {
+          pmStack.push(pm);
+          pm = freshGeomBucket();
+          pm.props = {}; pm.inline = {}; pm.extended = {}; pm.time = {};
+          pm.id = attrs.id || ""; pm.styleUrl = null; pm.multi = null; pm.multiDepth = 0; pm.multiFrozen = false; pm.styleOwns = null;
+          return;
+        }
+        if (local === "MultiGeometry" || local === "MultiTrack") { if (pm) openMulti(); return; }
+        if (local === "Polygon") { if (pm) geomStack.push({ k: "poly", rings: [] }); return; }
+        if (local === "LinearRing") { geomStack.push({ k: "ring", positions: [] }); return; }
+        if (local === "LineString") { if (pm) geomStack.push({ k: "line", positions: [] }); return; }
+        if (local === "Point") { if (pm) geomStack.push({ k: "point", nums: [] }); return; }
+        if (local === "Track") { if (pm) geomStack.push({ k: "track", positions: [], whens: [] }); return; }
+        if (local === "coordinates") {
+          const top = geomStack[geomStack.length - 1];
+          if (top && top.k === "point" && !top.sawCoords) { top.sawCoords = true; coordMode = { k: "point", buf: top.nums }; }
+          else if (top && (top.k === "line" || top.k === "ring") && !top.sawCoords) { top.sawCoords = true; coordMode = { k: "tuples", buf: top.positions }; }
+          return;
+        }
+        if (local === "coord") { coordMode = { k: "spaced", buf: [] }; return; }
+        if (local === "Style") {
+          styleStack.push(styleFrame);
+          styleFrame = { kind: "style", id: attrs.id || "", bag: {} };
+          if (pm && !pm.styleOwns) pm.styleOwns = styleFrame;
+          return;
+        }
+        if (local === "StyleMap") {
+          styleStack.push(styleFrame);
+          styleFrame = { kind: "map", id: attrs.id || "", url: null };
+          return;
+        }
+        if (local === "LineStyle") { paint = { kind: "line", color: "", width: "", fill: "", outline: "" }; return; }
+        if (local === "PolyStyle") { paint = { kind: "poly", color: "", width: "", fill: "", outline: "" }; return; }
+        if (local === "Data") { dataEl = { name: attrs.name || "", value: "", simple: false }; return; }
+        if (local === "SimpleData") {
+          dataEl = { name: attrs.name || "", value: "", simple: true };
+          textStack.push({ name: local, parts: [], n: 0 });
+          return;
+        }
+      } else {
+        if (local === "trk") { gpxCur = { kind: "trk", props: {}, segs: [], seg: null }; return; }
+        if (local === "rte") { gpxCur = { kind: "rte", props: {}, line: [] }; return; }
+        if (local === "trkseg" && gpxCur && gpxCur.kind === "trk") { gpxCur.seg = { coords: [], times: [] }; return; }
+        if (local === "wpt" || local === "trkpt" || local === "rtept") {
+          pt = gpxPoint(attrs);
+          if (local === "wpt") gpxCur = { kind: "wpt", props: {}, pt: pt };
+          return;
+        }
+      }
+      if (XML_TEXT[local]) textStack.push({ name: local, parts: [], n: 0 });
+    }
+
+    function endTag(local) {
+      if (textStack.length && textStack[textStack.length - 1].name === local) dispatchText(local, joinText(textStack.pop()));
+      if (ext === "kml") {
+        if (local === "Placemark") { pending.push(pm); pm = pmStack.pop() || null; return; }
+        if (local === "MultiGeometry" || local === "MultiTrack") {
+          if (pm && pm.multiDepth) { pm.multiDepth--; if (pm.multiDepth === 0) pm.multiFrozen = true; }
+          return;
+        }
+        if (local === "coordinates") { coordMode = null; return; }
+        if (local === "coord") { commitCoord(); return; }
+        if (local === "Point") { commitPoint(); return; }
+        if (local === "LineString") { commitLine(); return; }
+        if (local === "LinearRing") { commitRing(); return; }
+        if (local === "Polygon") { commitPoly(); return; }
+        if (local === "Track") { commitTrack(); return; }
+        if (local === "LineStyle" || local === "PolyStyle") { finishPaint(); return; }
+        if (local === "Style") {
+          if (styleFrame && styleFrame.kind === "style") {
+            if (styleFrame.id) styles[hashXmlId(styleFrame.id)] = orderedStyle(styleFrame.bag);
+            if (pm && pm.styleOwns === styleFrame) Object.assign(pm.inline, styleFrame.bag);
+          }
+          styleFrame = styleStack.pop() || null;
+          return;
+        }
+        if (local === "StyleMap") {
+          if (styleFrame && styleFrame.kind === "map" && styleFrame.id && styleFrame.url) styleMaps.push({ id: styleFrame.id, url: styleFrame.url });
+          styleFrame = styleStack.pop() || null;
+          return;
+        }
+        if (local === "Data" || local === "SimpleData") {
+          if (pm && dataEl && dataEl.name) pm.extended[dataEl.name] = dataEl.value;
+          dataEl = null;
+          return;
+        }
+      } else if (local === "trkpt" || local === "rtept") {
+        if (pt && pt.coord && gpxCur) {
+          if (gpxCur.kind === "trk" && gpxCur.seg) {
+            gpxCur.seg.coords.push(pt.coord);
+            if (pt.time) gpxCur.seg.times.push(pt.time);
+            addCoord(1);
+          } else if (gpxCur.kind === "rte") {
+            gpxCur.line.push(pt);
+            addCoord(1);
+          }
+        }
+        pt = null;
+        return;
+      } else if (local === "wpt") {
+        if (gpxCur && gpxCur.kind === "wpt" && gpxCur.pt && gpxCur.pt.coord) {
+          const props = gpxProps(null, gpxCur.props);
+          wpts.push({ type: "Feature", properties: props, geometry: { type: "Point", coordinates: gpxCur.pt.coord } });
+          addCoord(1);
+        }
+        gpxCur = null; pt = null;
+        return;
+      } else if (local === "trkseg") {
+        if (gpxCur && gpxCur.seg) {
+          if (gpxCur.seg.coords.length >= 2) gpxCur.segs.push(gpxCur.seg);
+          gpxCur.seg = null;
+        }
+        return;
+      } else if (local === "trk") {
+        if (gpxCur && gpxCur.kind === "trk") finishGpxTrack();
+        gpxCur = null;
+        return;
+      } else if (local === "rte") {
+        if (gpxCur && gpxCur.kind === "rte" && gpxCur.line.length >= 2) {
+          const coords = new Array(gpxCur.line.length), times = [];
+          for (let p = 0; p < gpxCur.line.length; p++) {
+            coords[p] = gpxCur.line[p].coord;
+            if (gpxCur.line[p].time) times.push(gpxCur.line[p].time);
+          }
+          const props = gpxProps("rte", gpxCur.props);
+          if (times.length) props.coordinateProperties = { times: times };
+          rtes.push({ type: "Feature", properties: props, geometry: { type: "LineString", coordinates: coords } });
+        }
+        gpxCur = null;
+        return;
+      }
+    }
+
+    while (i < end) {
+      if (i >= nextYield) { nextYield = i + XML_SLICE; yield; }
+      const code = src.charCodeAt(i);
+      if (code === 0) throw invalid();
+      if (code !== 60) {
+        if (isXmlSpace(code) && !coordMode && !textStack.length) { i++; continue; }
+        i = yield* feedUntilTag(i);
+        continue;
+      }
+      if (ext === "gpx") {
+        const fast = scanFastPoint(i);
+        if (fast) {
+          if (names.length >= LIMITS.xmlDepth) throw new Error("XML nesting is deeper than " + LIMITS.xmlDepth + " elements.");
+          if (!names.length && rooted) throw invalid();
+          if (!names.length) rooted = true;
+          if (++elements > LIMITS.xmlElements) throw new Error("File has more than " + LIMITS.xmlElements.toLocaleString() + " XML elements.");
+          if (fast.kind === "wpt") wpts.push({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates: fast.coord } });
+          else if (fast.kind === "trkpt" && gpxCur && gpxCur.kind === "trk" && gpxCur.seg) gpxCur.seg.coords.push(fast.coord);
+          else if (fast.kind === "rtept" && gpxCur && gpxCur.kind === "rte") gpxCur.line.push({ coord: fast.coord, time: null });
+          else { i = fast.i; continue; }
+          addCoord(1);
+          if ((elements & 1023) === 0) yield;
+          i = fast.i;
+          continue;
+        }
+      }
+      if (src.startsWith("!--", i + 1)) { i = yield* skipTo("-->", i + 4); continue; }
+      if (src.charCodeAt(i + 1) === 63) { i = yield* skipTo("?>", i + 2); continue; }
+      if (src.startsWith("![CDATA[", i + 1)) {
+        const contentAt = i + 9;
+        const closeAt = yield* skipTo("]]>", contentAt);
+        const contentEnd = closeAt - 3;
+        // CDATA is literal: "&" is not an entity reference.
+        if (coordMode && (coordMode.k === "point" || coordMode.k === "spaced")) yield* readFlatNumbers(contentAt, contentEnd, coordMode.buf);
+        else if (coordMode) yield* readTuples(contentAt, contentEnd, coordMode.buf);
+        else if (textStack.length) {
+          const item = textStack[textStack.length - 1];
+          if (item.n + (contentEnd - contentAt) > LIMITS.propertyString) throw new Error("A property value exceeds the 100,000 character limit.");
+          appendChunk(item, src.slice(contentAt, contentEnd));
+        }
+        i = closeAt;
+        continue;
+      }
+      if (src.charCodeAt(i + 1) === 33) throw new Error("XML with a DOCTYPE or ENTITY declaration is not accepted.");
+      if (src.charCodeAt(i + 1) === 47) {
+        const named = readName(i + 2);
+        let at = named.i;
+        while (at < end && isXmlSpace(src.charCodeAt(at))) at++;
+        if (src.charCodeAt(at) !== 62) throw invalid();
+        const open = names.pop();
+        if (open !== named.name) throw invalid();
+        endTag(localOf(named.name));
+        i = at + 1;
+        continue;
+      }
+      if (names.length >= LIMITS.xmlDepth) throw new Error("XML nesting is deeper than " + LIMITS.xmlDepth + " elements.");
+      if (!names.length && rooted) throw invalid();
+      const named = readName(i + 1);
+      const local = localOf(named.name);
+      const wanted = ext === "gpx" && (local === "wpt" || local === "trkpt" || local === "rtept") ? ["lat", "lon"]
+        : (local === "Placemark" || local === "Style" || local === "StyleMap") ? ["id"]
+        : (local === "Data" || local === "SimpleData") ? ["name"] : null;
+      const attrs = yield* readAttrs(named.i, wanted);
+      if (!names.length) rooted = true;
+      if (++elements > LIMITS.xmlElements) throw new Error("File has more than " + LIMITS.xmlElements.toLocaleString() + " XML elements.");
+      names.push(named.name);
+      startTag(local, attrs.found);
+      if (attrs.empty) {
+        names.pop();
+        endTag(local);
+      }
+      if ((elements & 1023) === 0) yield;
+      i = attrs.i;
+    }
+    if (names.length) throw invalid();
+    for (let map = 0; map < styleMaps.length; map++) {
+      const target = styles[hashXmlId(styleMaps[map].url)];
+      if (target) styles[hashXmlId(styleMaps[map].id)] = target;
+    }
+
+    if (ext === "gpx") return trks.concat(rtes, wpts);
+    const features = [];
+    for (let mark = 0; mark < pending.length; mark++) {
+      const feature = materialise(pending[mark]);
+      if (feature) features.push(feature);
+      if ((mark & 1023) === 1023) yield;
+    }
+    return features;
+  }
+
+  /* KML / GPX to a validated FeatureCollection. Yields between slices so the
+     page can paint and Cancel can stop the scan. Placemarks with no geometry
+     are left out, as before. */
   function* xmlToGeoJSONSteps(text, ext) {
     precheckXml(text, ext);
-    const doc = new root.DOMParser().parseFromString(text, "text/xml");
-    if (doc.getElementsByTagName("parsererror").length) throw new Error("File is not valid " + ext.toUpperCase() + " XML.");
     yield;
-    const features = [];
-    let n = 0;
-    for (const f of ext === "kml" ? root.toGeoJSON.kmlGen(doc) : root.toGeoJSON.gpxGen(doc)) {
-      // toGeoJSON emits null-geometry features for empty placemarks; skip
-      // them rather than rejecting the whole file.
-      if (f && f.geometry) features.push(f);
-      if (++n % 128 === 0) yield;
-    }
+    const features = yield* buildXmlFeatures(text, ext);
     yield;
     return validateFeatureCollection({ type: "FeatureCollection", features: features });
   }
@@ -825,8 +1624,8 @@
       } else if (filename.endsWith(".csv")) {
         counted(withNotes(label, csvToGeoJSON(decodeText(bytes))));
       } else if (/\.(kml|gpx)$/.test(filename)) {
-        // XML needs DOMParser, which workers lack: check what can be checked
-        // here and hand the text back for the page to convert (resolveXmlLayers).
+        // The page converts the text in slices (resolveXmlLayers) so Cancel
+        // can stop a large track between chunks.
         if (bytes.length > LIMITS.fileBytes) throw new Error(filename + " is too large (limit " + Math.round(LIMITS.fileBytes / 1048576) + " MiB).");
         const ext = filename.slice(-3), text = decodeText(bytes);
         counted({ name: label, xml: { ext: ext, text: text, items: precheckXml(text, ext) }, warnings: [] });

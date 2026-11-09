@@ -693,6 +693,113 @@ test("KML and GPX inside a ZIP or KMZ come back for the page to convert", async 
   await assert.rejects(P.resolveXmlLayers(two, run), /together exceed/);
 });
 
+function drainXml(xml, ext) {
+  const job = P.xmlToGeoJSONSteps(xml, ext);
+  let step, yields = 0, max = 0;
+  const started = performance.now();
+  do {
+    const slice = performance.now();
+    step = job.next();
+    max = Math.max(max, performance.now() - slice);
+    if (!step.done) yields++;
+  } while (!step.done);
+  return { value: step.value, yields, max, ms: performance.now() - started };
+}
+
+test("KML placemarks keep names, extended data and geometry", () => {
+  const kml = '<?xml version="1.0"?><kml><Document>' +
+    '<Style id="s"><LineStyle><color>ff0000ff</color><width>2</width></LineStyle></Style>' +
+    '<Placemark id="pier"><name>Pier</name><description>A &amp; B</description>' +
+    '<ExtendedData><Data name="k"><value>1</value></Data><SimpleData name="code">AB</SimpleData></ExtendedData>' +
+    '<styleUrl>#s</styleUrl><Point><coordinates>-3.2,55.9,12</coordinates></Point></Placemark>' +
+    '<Placemark><name>skip</name></Placemark>' +
+    '<Placemark><LineString><coordinates>-3.2,55.9 -3.1,55.95</coordinates></LineString></Placemark>' +
+    '<Placemark><Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 1,0 1,1 0,0</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>' +
+    "</Document></kml>";
+  const fc = P.xmlToGeoJSON(kml, "kml");
+  assert.equal(fc.features.length, 3);
+  assert.equal(fc.features[0].id, "pier");
+  assert.equal(fc.features[0].properties.name, "Pier");
+  assert.equal(fc.features[0].properties.description, "A & B");
+  assert.equal(fc.features[0].properties.k, "1");
+  assert.equal(fc.features[0].properties.code, "AB");
+  assert.equal(fc.features[0].properties.stroke, "#ff0000");
+  assert.equal(fc.features[0].properties["stroke-width"], 2);
+  assert.deepEqual(fc.features[0].geometry.coordinates, [-3.2, 55.9, 12]);
+  assert.equal(fc.features[1].geometry.type, "LineString");
+  assert.equal(fc.features[1].geometry.coordinates.length, 2);
+  assert.equal(fc.features[2].geometry.coordinates[0].length, 4);
+  assert.deepEqual(fc.features[2].geometry.coordinates[0][0], fc.features[2].geometry.coordinates[0][3]);
+});
+
+test("GPX tracks, routes and waypoints keep their geometry", () => {
+  const gpx = '<?xml version="1.0"?><gpx version="1.1">' +
+    '<wpt lat="55.9" lon="-3.3"><name>Start</name><ele>0</ele></wpt>' +
+    '<trk><name>Arthur\'s Seat walk</name><trkseg>' +
+    '<trkpt lat="55.944" lon="-3.175"><ele>10</ele></trkpt>' +
+    '<trkpt lat="55.946" lon="-3.165"/>' +
+    '<trkpt lat="55.951" lon="-3.160"/>' +
+    "</trkseg></trk>" +
+    '<rte><name>Road</name><rtept lat="1" lon="2"/><rtept lat="3" lon="4"/></rte></gpx>';
+  const fc = P.xmlToGeoJSON(gpx, "gpx");
+  assert.deepEqual(fc.features.map((f) => f.geometry.type), ["LineString", "LineString", "Point"]);
+  assert.equal(fc.features[0].properties.name, "Arthur's Seat walk");
+  assert.equal(fc.features[0].properties._gpxType, "trk");
+  assert.deepEqual(fc.features[0].geometry.coordinates[0], [-3.175, 55.944, 10]);
+  assert.deepEqual(fc.features[2].geometry.coordinates, [-3.3, 55.9]);
+  assert.equal(fc.features[2].properties.name, "Start");
+});
+
+test("KML and GPX reject declarations, custom entities and deep nesting", () => {
+  assert.equal(typeof DOMParser, "undefined");
+  const point = "<kml><Placemark><Point><coordinates>1,2</coordinates></Point></Placemark></kml>";
+  assert.throws(() => P.xmlToGeoJSON('<!DOCTYPE x [<!ENTITY a "b">]>' + point, "kml"), /DOCTYPE or ENTITY/);
+  assert.throws(() => P.xmlToGeoJSON("<!ELEMENT kml (Placemark)>" + point, "kml"), /DOCTYPE or ENTITY/);
+  assert.throws(() => P.xmlToGeoJSON("<kml><Placemark><name>&lol;</name><Point><coordinates>1,2</coordinates></Point></Placemark></kml>", "kml"), /entity references/);
+  const started = performance.now();
+  const bomb = '<!DOCTYPE lolz [<!ENTITY lol "lol">' +
+    '<!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">' +
+    '<!ENTITY lol9 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">]>' + point;
+  assert.throws(() => P.xmlToGeoJSON(bomb, "kml"), /DOCTYPE or ENTITY/);
+  assert.ok(performance.now() - started < 50, "entity declaration was expanded");
+  const deep = "<kml>" + "<Folder>".repeat(70) + "<Placemark><Point><coordinates>1,2</coordinates></Point></Placemark>" + "</Folder>".repeat(70) + "</kml>";
+  const deepAt = performance.now();
+  assert.throws(() => P.xmlToGeoJSON(deep, "kml"), new RegExp("deeper than " + P.LIMITS.xmlDepth + " elements"));
+  assert.ok(performance.now() - deepAt < 50, "deep nesting was parsed");
+  assert.throws(() => P.xmlToGeoJSON("<kml><Placemark></Folder></kml>", "kml"), /not valid KML/);
+  assert.throws(() => P.xmlToGeoJSON("<r>" + "<a>".repeat(P.LIMITS.xmlDepth) + "x" + "</a>".repeat(P.LIMITS.xmlDepth) + "</r>", "kml"), /nesting/);
+});
+
+test("a KML or GPX over the feature cap is refused before it is scanned", () => {
+  const mark = "<Placemark><Point><coordinates>1,1</coordinates></Point></Placemark>";
+  assert.throws(() => P.xmlToGeoJSON("<kml>" + mark.repeat(P.LIMITS.features + 1) + "</kml>", "kml"),
+    new RegExp("more than " + P.LIMITS.features.toLocaleString() + " placemarks"));
+  assert.throws(() => P.xmlToGeoJSON("<gpx>" + '<wpt lat="1" lon="1"/>'.repeat(P.LIMITS.features + 1) + "</gpx>", "gpx"),
+    /waypoints, tracks and routes/);
+});
+
+test("large KML and GPX stay inside a slice bound", () => {
+  // One track used to occupy the UI for the whole DOMParser call (about 1.6 s
+  // for 400,000 points). The scan has to yield well inside that.
+  const points = 400000;
+  const gpx = '<?xml version="1.0"?><gpx><trk><trkseg>' + '<trkpt lat="55.1" lon="-3.1"/>'.repeat(points) + "</trkseg></trk></gpx>";
+  const track = drainXml(gpx, "gpx");
+  assert.equal(track.value.features.length, 1);
+  assert.equal(track.value.coordinateCount, points);
+  assert.ok(track.yields >= 20, "yields " + track.yields);
+  assert.ok(track.max < 900, "longest GPX slice " + track.max.toFixed(1) + " ms");
+  assert.ok(track.ms < 10000, "GPX took " + track.ms.toFixed(0) + " ms");
+
+  const marks = 4000;
+  const kml = '<?xml version="1.0"?><kml><Document>' +
+    '<Placemark><name>P</name><Point><coordinates>-3.1,55.9</coordinates></Point></Placemark>'.repeat(marks) +
+    "</Document></kml>";
+  const places = drainXml(kml, "kml");
+  assert.equal(places.value.features.length, marks);
+  assert.ok(places.yields >= 8, "yields " + places.yields);
+  assert.ok(places.max < 900, "longest KML slice " + places.max.toFixed(1) + " ms");
+});
+
 test("parse worker dispatches jobs, reports rejected inputs and remains usable", async () => {
   const replies = [], imports = [];
   const context = vm.createContext({
