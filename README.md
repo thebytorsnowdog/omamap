@@ -136,7 +136,7 @@ Your data files never leave your machine. Only basemap tiles are fetched over th
 | Satellite | Esri World Imagery |
 | None | Nothing is requested |
 
-Tile requests reveal the area you are viewing to that provider. The window can't contact any other host. A Content Security Policy in the page and a request filter in the host both enforce this. Tile requests identify themselves as `OmaMap/<version>` and do not send the page address.
+Tile requests reveal the area you are viewing to that provider. The window can't contact any other host. A Content Security Policy in the page and a request filter in the host both enforce this. Tile requests identify themselves as `OmaMap/<version> (+https://github.com/thebytorsnowdog/omamap)` and do not send the page address.
 
 Viewed tiles are kept in an ordinary HTTP cache (`~/.cache/omamap`, up to 512 MiB) that follows each provider's caching headers. OmaMap never downloads areas in bulk or ahead of time. The last map view and basemap choice are remembered in `~/.local/share/omamap`, the folder you last saved a profile to in `~/.config/omamap`, and recently opened files (for the bar widget) in `~/.local/state/omamap/recent.json`, readable only by you.
 
