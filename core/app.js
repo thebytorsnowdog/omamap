@@ -945,8 +945,8 @@ async function parseOne(file) {
   if (typeof file.size === "number" && file.size > limit) throw new Error("File is too large (limit " + Math.round(limit / 1048576) + " MiB).");
   const buffer = await readBuffer(file);
   if (ext === "kml" || ext === "gpx") {
-    // XML formats need DOMParser, which workers lack: convert on the page,
-    // in slices so the window stays responsive and Cancel works.
+    // KML and GPX stay on the page so Cancel can stop the scanner between
+    // slices. The scanner does not use DOMParser.
     if (buffer.byteLength > OmaParse.LIMITS.fileBytes) throw new Error("File is too large.");
     const text = new TextDecoder("utf-8").decode(buffer);
     return [{ name: OmaParse.baseName(file.name), geojson: await runSliced(OmaParse.xmlToGeoJSONSteps(text, ext)) }];

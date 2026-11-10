@@ -1,6 +1,6 @@
 "use strict";
 /* Parsing off the UI thread. Receives file bytes, returns validated
-   FeatureCollections. KML/GPX never arrive here (they need DOMParser). */
+   FeatureCollections. The page converts KML and GPX itself, in slices. */
 importScripts("vendor/fflate.js", "vendor/shp.js", "vendor/papaparse.min.js", "parse.js");
 
 self.onmessage = async function (event) {
