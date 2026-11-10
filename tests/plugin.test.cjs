@@ -95,3 +95,11 @@ test("the plugin exposes only the bar widget to the shell", () => {
   assert.deepEqual(tracked.filter((f) => /\.qml$|(^|\/)qmldir$/.test(f)), ["omarchy-plugin/BarWidget.qml"]);
   assert.equal(tracked.filter((f) => f.endsWith("manifest.json")).length, 1);
 });
+
+test("the desktop file association ends option parsing before the files", () => {
+  const desktop = fs.readFileSync(path.join(ROOT, "packaging", "omamap.desktop"), "utf8");
+  const exec = desktop.split("\n").find((line) => line.startsWith("Exec="));
+  // A file whose name starts with a dash must stay a file. The bar widget
+  // already passes --; the file manager launch has to do the same.
+  assert.equal(exec, "Exec=omamap -- %F");
+});

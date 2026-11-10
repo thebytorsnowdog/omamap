@@ -109,7 +109,7 @@ Run the browser suite before `tests/host-smoke.sh`; the smoke test uses browser-
 | `npm run lint` | First-party JS/shared globals and test code | Every change to JS or tooling |
 | `npm test` | Parser limits, profiles, classification, measurement, spatial queries, rendering helpers, keyboard handling, plugin launches, tile policy and vendor hashes | Fast local regression loop |
 | `npm run test:browser` | File loading, rendering, tables, styling, profiles, cancellation and hostile input in real Chromium | Web behaviour and the full PR gate |
-| CMake build + `ctest` | Native compilation and profile-save, recent-list and core-directory trust regressions | Native changes and the full PR gate |
+| CMake build + `ctest` | Native compilation, plus the profile-save, recent-file, trusted-core, IPC and regular-file tests | Native changes and the full PR gate |
 | `tests/host-smoke.sh` | Native scheme, file handoff, theme, downloads and host hardening under Qt WebEngine | Desktop integration and the full PR gate |
 | `scripts/check-vendor-advisories.py` | Vendor release provenance and current GitHub advisory queries | Online dependency maintenance |
 
