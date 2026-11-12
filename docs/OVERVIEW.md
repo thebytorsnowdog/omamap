@@ -32,7 +32,7 @@ There is no JavaScript bundler or generated frontend. `index.html` loads ordinar
 
 ### Import and validation
 
-1. A picker/drop supplies browser `File` objects. For command-line and file-manager opens, `Window::flush` registers readable files with `SchemeHandler` and passes names, sizes and one-use URLs to `OmaMap.openUrls`. The page fetches only those files through its own origin.
+1. A picker/drop supplies browser `File` objects. For command-line and file-manager opens, `Window::flush` expands any `.shp` path with readable same-stem `.dbf`, `.prj` and `.cpg` companions in the same directory (verified via `openRegularFile`), registers readable files with `SchemeHandler`, and passes names, sizes and one-use URLs to `OmaMap.openUrls`. The page fetches only those files through its own origin.
 2. `handleFiles` queues import batches, groups loose shapefile parts by filename stem, and limits the batch to 100 files. `parseOne` checks size before reading bytes. Worker jobs transfer their buffers rather than copying them.
 3. `parse.js` dispatches by format. GeoJSON is normalised; coordinate columns become CSV points; shapefiles use `shpjs` and optional `.prj`/`.cpg`; ZIPs are inspected and extracted in memory. ZIP members are never unpacked to disk. Stored/deflated entries, CRCs, sizes, names, header agreement, expansion ratio and aggregate budgets are checked.
 4. Every resulting layer goes through `validateFeatureCollection`: geometry/coordinate checks, bounded JSON properties, complete field discovery and estimated size accounting. Accepted coordinates are WGS84 longitude/latitude. British National Grid CSV and explicitly declared EPSG:27700 GeoJSON use the built-in Helmert conversion; other shapefile projections use the bundled projection support.
@@ -48,7 +48,7 @@ Each dataset keeps its validated GeoJSON, fields, ordered feature/layer arrays, 
 
 `batchcanvas.js` optimises tiny line/polygon shapes in large vector datasets (at least 2,000 non-Point features): shapes at most three pixels across become small filled rectangles, while selected and larger shapes retain full rendering. `SpatialIndex` uses an adaptive grid, then a coarser grid for geometries that would fill too many fine cells. Only geometries that also cover that coarser grid stay on the overflow list checked for every query. Exact hit testing then uses the renderer's geometry checks, with results ordered from the last dataset/feature backwards so overlapping features can be cycled. Zoomed-in 2D point layers consult the same kind of binning and skip points outside the view; a wide view still walks every point.
 
-`style.js` builds categories or numeric quantile ranges and resolves class colours against the current theme. `table.js` searches/sorts cooperatively and virtualises both rows and columns, with a 16 MiB search-text cache per dataset. Revision counters stop an older asynchronous table computation from replacing newer results. The inspector floats above the map, so opening it does not resize the map canvas.
+`style.js` builds categories or numeric quantile ranges, resolves class colours against the current theme, and lets legend rows toggle or isolate classes across map rendering, hit testing, profile saves and the attribute table. `table.js` searches/sorts cooperatively, exports matched rows as bounded CSV or GeoJSON blobs, and virtualises both rows and columns, with a 16 MiB search-text cache per dataset. Revision counters stop an older asynchronous table computation from replacing newer results. The inspector floats above the map, so opening it does not resize the map canvas.
 
 ### Profiles and native integration
 
@@ -56,7 +56,7 @@ Profiles are versioned JSON containing full feature data, styles, warnings, visi
 
 `restoreProfile` prepares every replacement dataset off-map before replacing the current workspace. Failed or cancelled restoration retains the old workspace. `profileBlob` serialises in bounded batches and rejects exports larger than the same 100 MiB UTF-8 reopening limit. The Qt host intercepts the blob download, asks for a destination, stages the completed file in a private directory on that filesystem, and commits it with an atomic replacement. Browser-only development uses the browser's download mechanism instead.
 
-The host's page bridge is `window.OmaMap`: `applyTheme`, `openUrls`, `setHost` and `profileSaved`. It passes structured values using JSON; there is no general-purpose command-execution bridge. Host responsibilities also include same-user single-instance IPC, desktop links, a recent-file list, denial of unneeded browser permissions, request filtering and bounded renderer-crash recovery. A normal second invocation forwards paths to the first window; `--new-window` opens an independent window.
+The host's page bridge is `window.OmaMap`: `applyTheme`, `openUrls`, `setHost`, `profileSaved` and `exportSaved`. It passes structured values using JSON; there is no general-purpose command-execution bridge. Host responsibilities also include same-user single-instance IPC, desktop links, atomic `.omamap`/`.csv`/`.geojson` blob saves, a recent-file list, denial of unneeded browser permissions, request filtering and bounded renderer-crash recovery. A normal second invocation forwards paths to the first window; `--new-window` opens an independent window.
 
 ## Build and run
 
@@ -109,7 +109,7 @@ Run the browser suite before `tests/host-smoke.sh`; the smoke test uses browser-
 | `npm run lint` | First-party JS/shared globals and test code | Every change to JS or tooling |
 | `npm test` | Parser limits, profiles, classification, measurement, spatial queries, rendering helpers, keyboard handling, plugin launches, tile policy and vendor hashes | Fast local regression loop |
 | `npm run test:browser` | File loading, rendering, tables, styling, profiles, cancellation and hostile input in real Chromium | Web behaviour and the full PR gate |
-| CMake build + `ctest` | Native compilation, plus the profile-save, recent-file, trusted-core, IPC and regular-file tests | Native changes and the full PR gate |
+| CMake build + `ctest` | Native compilation, plus the profile-save, recent-file, trusted-core, IPC, regular-file and shapefile-companions tests | Native changes and the full PR gate |
 | `tests/host-smoke.sh` | Native scheme, file handoff, theme, downloads and host hardening under Qt WebEngine | Desktop integration and the full PR gate |
 | `scripts/check-vendor-advisories.py` | Vendor release provenance and current GitHub advisory queries | Online dependency maintenance |
 

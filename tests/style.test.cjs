@@ -22,7 +22,8 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(source + `\nthis.StyleTest = {
-  CLASS_OTHER, CLASS_MISSING, fieldIsNumeric, setColourBy, colourBySteps, featureColour
+  CLASS_OTHER, CLASS_MISSING, fieldIsNumeric, setColourBy, colourBySteps, featureColour,
+  isFeatureHiddenByClass, toggleLegendClass, resetLegendFilter
 };`, context);
 const S = context.StyleTest;
 const dataset = (values) => ({
@@ -100,4 +101,27 @@ test("semantic category labels still normalize hyphens and underscores", () => {
   assert.deepEqual(Array.from(ds.style.byField.classes, (c) => [c.key, c.count, c.meaning]), [
     ["in service", 1, "good"], ["out of service", 3, "bad"]
   ]);
+});
+
+test("legend class toggles and isolation update feature visibility and reset cleanly", () => {
+  const ds = dataset(["alpha", "alpha", "beta", "gamma", null]);
+  S.setColourBy(ds, "value", "categories", false);
+  assert.equal(S.isFeatureHiddenByClass(ds, 0), false);
+
+  S.toggleLegendClass(ds, 0, false);
+  assert.equal(S.isFeatureHiddenByClass(ds, 0), true);
+  assert.equal(S.isFeatureHiddenByClass(ds, 2), false);
+  assert.equal(S.isFeatureHiddenByClass(ds, 4), false);
+
+  S.toggleLegendClass(ds, 1, true);
+  assert.deepEqual([0, 1, 2, 3, 4].map((i) => S.isFeatureHiddenByClass(ds, i)), [true, true, false, true, true]);
+
+  S.toggleLegendClass(ds, 1, true);
+  assert.deepEqual([0, 1, 2, 3, 4].map((i) => S.isFeatureHiddenByClass(ds, i)), [false, false, false, false, false]);
+
+  S.toggleLegendClass(ds, S.CLASS_MISSING, false);
+  assert.equal(S.isFeatureHiddenByClass(ds, 4), true);
+  assert.equal(S.resetLegendFilter(ds), true);
+  assert.equal(S.isFeatureHiddenByClass(ds, 4), false);
+  assert.equal(S.resetLegendFilter(ds), false);
 });

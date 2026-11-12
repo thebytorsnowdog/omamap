@@ -836,6 +836,122 @@ function fixtures(dir) {
     assert.equal(r.zoomedFull, true, "zoomed in, every shape is drawn by Leaflet");
   });
 
+  await check("legend filtering toggles, isolates, prunes selection, updates the table and persists in profiles", async () => {
+    await page.evaluate(() => {
+      clearAll();
+      addDataset({
+        name: "valves",
+        geojson: {
+          type: "FeatureCollection",
+          features: [
+            { type: "Feature", properties: { name: "V1", status: "In service", flow: -4.5 }, geometry: { type: "Point", coordinates: [-3.19, 55.95] } },
+            { type: "Feature", properties: { name: "V2", status: "In service", flow: "=1+1" }, geometry: { type: "Point", coordinates: [-3.18, 55.95] } },
+            { type: "Feature", properties: { name: "V3", status: "Planned", flow: 12 }, geometry: { type: "Point", coordinates: [-3.17, 55.95] } },
+            { type: "Feature", properties: { name: "V4", status: "Out of service", flow: 8 }, geometry: { type: "Point", coordinates: [-3.16, 55.95] } }
+          ]
+        }
+      });
+      renderLayerList();
+      STATE.map.setView([55.95, -3.175], 14, { animate: false });
+    });
+    await page.locator('button[aria-label="Style valves"]').click();
+    await page.locator(".style-editor .st-row", { hasText: "Colour by" }).locator("select").selectOption("status");
+    await settle();
+    await page.locator('button[aria-label="Attribute table for valves"]').click();
+    await page.waitForFunction(() => document.getElementById("tp-count").textContent === "4 rows");
+
+    const v1Pt = await page.evaluate(() => {
+      const p = STATE.map.latLngToContainerPoint([55.95, -3.19]);
+      const r = document.getElementById("map").getBoundingClientRect();
+      return { x: r.left + p.x, y: r.top + p.y };
+    });
+    await page.mouse.click(v1Pt.x, v1Pt.y);
+    assert.equal(await page.locator("#inspector").isHidden(), false);
+
+    const inServiceRow = page.locator("#legend .lg-row", { hasText: "In service" });
+    await inServiceRow.click();
+    await settle();
+    assert.equal(await page.locator("#inspector").isHidden(), true, "hiding the selected class clears selection");
+    assert.equal(await page.locator("#legend .lg-row", { hasText: "In service" }).getAttribute("aria-pressed"), "false");
+    assert.equal(await page.locator("#tp-count").textContent(), "2 of 4 rows");
+    const hitHidden = await page.evaluate(() => identify(STATE.map.latLngToLayerPoint([55.95, -3.19])).length);
+    assert.equal(hitHidden, 0, "hidden class cannot be hit-tested");
+    const alphaHidden = await page.evaluate(() => {
+      const ds = STATE.datasets[0], cv = ds.layer._canvas, ctx = cv.getContext("2d");
+      const lp = STATE.map.latLngToLayerPoint([55.95, -3.19]).subtract(ds.layer._pxBounds.min);
+      const dpr = window.devicePixelRatio || 1;
+      return ctx.getImageData(Math.round(lp.x * dpr), Math.round(lp.y * dpr), 1, 1).data[3];
+    });
+    assert.equal(alphaHidden, 0, "hidden point paints zero alpha");
+
+    await page.locator("#legend .lg-row", { hasText: "Planned" }).dblclick();
+    await settle();
+    assert.equal(await page.locator("#tp-count").textContent(), "1 of 4 rows");
+
+    const [profDownload] = await Promise.all([
+      page.waitForEvent("download", { timeout: 5000 }),
+      page.keyboard.press("Control+s")
+    ]);
+    const profPath = path.join(OUT, "valves-filtered.omamap");
+    await profDownload.saveAs(profPath);
+    await page.evaluate(() => clearAll());
+    await page.setInputFiles("#file-input", profPath);
+    await page.waitForFunction(() => STATE.datasets.length === 1 && document.getElementById("loading").hidden);
+    await page.locator('button[aria-label="Attribute table for valves"]').click();
+    await settle();
+    assert.equal(await page.locator("#tp-count").textContent(), "1 of 4 rows", "saved profile preserves isolated legend class");
+
+    await page.locator("#legend .lg-reset").click();
+    await settle();
+    await page.waitForFunction(() => document.getElementById("tp-count").textContent === "4 rows");
+    const alphaShown = await page.evaluate(() => {
+      const ds = STATE.datasets[0], cv = ds.layer._canvas, ctx = cv.getContext("2d");
+      const lp = STATE.map.latLngToLayerPoint([55.95, -3.19]).subtract(ds.layer._pxBounds.min);
+      const dpr = window.devicePixelRatio || 1;
+      return ctx.getImageData(Math.round(lp.x * dpr), Math.round(lp.y * dpr), 1, 1).data[3];
+    });
+    assert.ok(alphaShown > 180, "resetting legend filter restores painted point");
+  });
+
+  await check("table exports filtered and sorted rows as formula-safe CSV and GeoJSON that re-import cleanly", async () => {
+    await page.locator("#legend .lg-row", { hasText: "Out of service" }).click();
+    await settle();
+    await page.fill("#tp-search", "In service");
+    await page.waitForFunction(() => document.getElementById("tp-count").textContent === "2 of 4 rows");
+    await page.locator(".tp-hcell", { hasText: "name" }).click();
+    await page.locator(".tp-hcell", { hasText: "name" }).click();
+    await settle();
+
+    const [csvDownload] = await Promise.all([
+      page.waitForEvent("download", { timeout: 5000 }),
+      page.locator("#tp-export-csv").click({ timeout: 5000 })
+    ]);
+    assert.equal(csvDownload.suggestedFilename(), "valves.csv");
+    const csvPath = path.join(OUT, "valves-export.csv");
+    await csvDownload.saveAs(csvPath);
+    const csvLines = fs.readFileSync(csvPath, "utf8").trim().split(/\r?\n/);
+    assert.deepEqual(csvLines, [
+      "name,status,flow,latitude,longitude",
+      "V2,In service,'=1+1,55.95,-3.18",
+      "V1,In service,-4.5,55.95,-3.19"
+    ]);
+
+    const [geoDownload] = await Promise.all([
+      page.waitForEvent("download", { timeout: 5000 }),
+      page.locator("#tp-export-geojson").click({ timeout: 5000 })
+    ]);
+    assert.equal(geoDownload.suggestedFilename(), "valves.geojson");
+    const geoPath = path.join(OUT, "valves-export.geojson");
+    await geoDownload.saveAs(geoPath);
+    const geo = JSON.parse(fs.readFileSync(geoPath, "utf8"));
+    assert.deepEqual(geo.features.map((f) => f.properties.name), ["V2", "V1"]);
+
+    await page.setInputFiles("#file-input", [csvPath, geoPath]);
+    await page.waitForFunction(() => STATE.datasets.length === 3 && document.getElementById("loading").hidden);
+    const counts = await page.evaluate(() => STATE.datasets.map((d) => d.name + ":" + d.featureCount));
+    assert.deepEqual(counts, ["valves:4", "valves-export:2", "valves-export:2"]);
+  });
+
   await check("no page errors", async () => { assert.deepEqual(errors, []); });
 
   await browser.close();

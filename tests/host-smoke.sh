@@ -86,6 +86,27 @@ else
   echo "✖ a saved profile reopens from the command line: $out"; fail=1
 fi
 
+# Reopening a loose .shp by itself discovers its same-stem .dbf and .prj companions.
+shp_probe='loadQueue.then(() => { const d = STATE.datasets[0]; toast("shp_companions attrs=" + Object.keys(d.features[0].properties).length + " warn=" + d.warnings.length, "", "ok"); window.shpProbed = true; });'
+out=$(OMAMAP_SELFTEST=1 OMAMAP_SELFTEST_WAIT='window.shpProbed === true' OMAMAP_SELFTEST_JS="$shp_probe" \
+  timeout -k 5 60 "$bin" --new-window "$fix/loose/projected.shp" 2>> "$hostlog" | tail -1)
+if [[ $out == *'projected:1'* && $out == *'warn=0'* && $out != *'attrs=0'* && $out == *'"errors":[]'* ]]; then
+  echo "✔ opening a loose .shp discovers its .dbf and .prj companions"
+else
+  echo "✖ opening a loose .shp discovers its .dbf and .prj companions: $out"; fail=1
+fi
+
+# Exporting filtered table rows writes through the atomic host save path.
+exported=$XDG_DATA_HOME/waverley.csv
+out=$(OMAMAP_SAVE_PATH=$exported OMAMAP_SELFTEST=1 OMAMAP_SELFTEST_WAIT='window.exportedByHost === true' \
+  OMAMAP_SELFTEST_JS='const saved = window.OmaMap.exportSaved; window.OmaMap.exportSaved = function (path) { saved(path); window.exportedByHost = true; }; loadQueue.then(async () => { Table.open(STATE.datasets[0]); Table.query = "Waverley"; await Table.refilter(); await Table.exportRows("csv"); });' \
+  timeout -k 5 60 "$bin" --new-window "$fix/stations.csv" 2>> "$hostlog" | tail -1)
+if [[ -s $exported && $(stat -c %a "$exported") == 600 ]] && grep -q 'Waverley' "$exported" && ! grep -q 'Haymarket' "$exported"; then
+  echo "✔ exporting filtered table rows writes a private CSV through the host"
+else
+  echo "✖ exporting filtered table rows writes a private CSV through the host: $(ls -la "$exported" 2>&1) $out"; fail=1
+fi
+
 # Kill the page's renderer process: the app must reload the page and say so.
 log=$(mktemp "$scratch/page.XXXXXX")
 crashlog=$(mktemp "$scratch/crash.XXXXXX.stderr")

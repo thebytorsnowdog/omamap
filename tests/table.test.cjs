@@ -10,6 +10,7 @@ function table(properties, overrides = {}) {
   const context = vm.createContext({
     performance: { now: () => 0 }, setTimeout,
     requestAnimationFrame: () => 1, cancelAnimationFrame() {},
+    TextEncoder, Blob,
     el(id) {
       if (!elements.has(id)) elements.set(id, { style: {}, scrollWidth: 400 });
       return elements.get(id);
@@ -22,7 +23,7 @@ function table(properties, overrides = {}) {
   }
   vm.runInContext("this.table = Table;", context);
   context.table.ds = { features: properties.map((p) => ({ properties: p })) };
-  return { table: context.table, elements };
+  return { table: context.table, elements, context };
 }
 
 test("table sorts numbers and numeric strings stably with missing values last in either direction", async () => {
@@ -138,4 +139,55 @@ test("a selection made while the initial filter is yielding is revealed when row
   assert.ok(selectedTop >= scroll.scrollTop + 26 && selectedTop + 26 <= scroll.scrollTop + scroll.clientHeight,
     "the selected row is inside the viewport after filtering");
   assert.equal(t.pendingReveal, false);
+});
+
+test("table excludes rows whose legend class is hidden and restores them on reset", async () => {
+  const { table: t, elements, context } = table([
+    { status: "active" }, { status: "planned" }, { status: "active" }, { status: null }
+  ]);
+  t.ds.style = { byField: null };
+  t.ds.classOf = null;
+  vm.runInContext('setColourBy(table.ds, "status", "categories", false);', context);
+  vm.runInContext('toggleLegendClass(table.ds, 0, false);', context);
+  await t.refilter();
+  assert.deepEqual(Array.from(t.order), [1, 3]);
+  assert.equal(elements.get("tp-count").textContent, "2 of 4 rows");
+  vm.runInContext('resetLegendFilter(table.ds);', context);
+  await t.refilter();
+  assert.deepEqual(Array.from(t.order), [0, 1, 2, 3]);
+});
+
+test("table CSV and GeoJSON exports preserve filter order, escape formulas without breaking negative numbers, and include point coordinates", async () => {
+  const { table: t, elements, context } = table([
+    { name: '=SUM(A1:A2)', delta: "-3.189", note: 'Park "A", East' },
+    { name: "@cmd", delta: "+42.5", note: "skip me" },
+    { name: "-danger", delta: -12, note: "keep" }
+  ]);
+  t.ds.features[0].geometry = { type: "Point", coordinates: [-3.189, 55.952] };
+  t.ds.features[1].geometry = { type: "Point", coordinates: [-3.2, 55.94] };
+  t.ds.features[2].geometry = { type: "Point", coordinates: [-3.15, 55.96] };
+  t.query = "";
+  t.sort = { field: "delta", dir: 1 };
+  await t.refilter();
+  assert.equal(elements.get("tp-export-csv").disabled, false);
+  assert.equal(elements.get("tp-export-geojson").disabled, false);
+
+  const subset = Array.from(t.order).filter((i) => i !== 1);
+  const csvBlob = await context.buildTableCsvBlob(t.ds, subset);
+  const csvText = await csvBlob.text();
+  assert.deepEqual(csvText.trim().split("\r\n"), [
+    "name,delta,note,latitude,longitude",
+    "'-danger,-12,keep,55.96,-3.15",
+    '\'=SUM(A1:A2),-3.189,"Park ""A"", East",55.952,-3.189'
+  ]);
+
+  const geoBlob = await context.buildTableGeoJsonBlob(t.ds, subset);
+  const geo = JSON.parse(await geoBlob.text());
+  assert.equal(geo.type, "FeatureCollection");
+  assert.deepEqual(geo.features.map((f) => f.properties.delta), [-12, "-3.189"]);
+
+  t.query = "nothing-matches-this";
+  await t.refilter();
+  assert.equal(elements.get("tp-export-csv").disabled, true);
+  assert.equal(elements.get("tp-export-geojson").disabled, true);
 });

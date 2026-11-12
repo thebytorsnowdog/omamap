@@ -190,25 +190,29 @@ function eachLeaf(layer, fn) {
   else fn(layer);
 }
 
+const HIDDEN_LEAF_STYLE = { stroke: false, fill: false, weight: 0, opacity: 0, fillOpacity: 0, radius: 0 };
+
 function leafStyle(leaf, colour, style, selected) {
   const accent = cssVar("--accent");
   const outline = style.outline === "fg" ? cssVar("--fg") : style.outline === "bg" ? cssVar("--bg-deep") : null;
   if (leaf.isFastPoint || leaf instanceof L.CircleMarker) {
-    if (selected) return { radius: style.radius + 3.5, color: accent, weight: 3, fillColor: colour, fillOpacity: 1, opacity: 1 };
+    if (selected) return { stroke: true, fill: true, radius: style.radius + 3.5, color: accent, weight: 3, fillColor: colour, fillOpacity: 1, opacity: 1 };
     return {
+      stroke: style.outline !== "none", fill: true,
       radius: style.radius, fillColor: colour, fillOpacity: style.fillOpacity,
       color: outline || cssVar("--bg-deep"), weight: style.outline === "none" ? 0 : 1.5, opacity: 0.9
     };
   }
   if (leaf instanceof L.Polygon) {
-    if (selected) return { color: accent, weight: Math.max(3.5, style.weight + 1.5), fillColor: colour, fillOpacity: Math.min(1, style.fillOpacity + 0.2), opacity: 1 };
+    if (selected) return { stroke: true, fill: true, color: accent, weight: Math.max(3.5, style.weight + 1.5), fillColor: colour, fillOpacity: Math.min(1, style.fillOpacity + 0.2), opacity: 1 };
     return {
+      stroke: style.outline !== "none", fill: true,
       color: outline || colour, weight: style.outline === "none" ? 0 : style.weight, opacity: 0.95,
       fillColor: colour, fillOpacity: style.fillOpacity
     };
   }
-  if (selected) return { color: accent, weight: style.weight + 3, opacity: 1 };
-  return { color: colour, weight: style.weight, opacity: 0.95 };
+  if (selected) return { stroke: true, fill: false, color: accent, weight: style.weight + 3, opacity: 1 };
+  return { stroke: true, fill: false, color: colour, weight: style.weight, opacity: 0.95 };
 }
 
 function leafKind(leaf) {
@@ -218,6 +222,14 @@ function leafKind(leaf) {
 // Features that look the same share one style object (treated as read-only),
 // so restyling a large dataset allocates per class, not per feature.
 function styleFeatureLayer(layer, ds, selected, cache) {
+  if (!selected && isFeatureHiddenByClass(ds, layer._omaIndex)) {
+    eachLeaf(layer, function (leaf) {
+      if (!leaf.setStyle) return;
+      if (leaf._omaBatch && leaf._omaHighlight) leaf._omaHighlight = false;
+      leaf.setStyle(HIDDEN_LEAF_STYLE);
+    });
+    return;
+  }
   const colour = featureColour(ds, layer._omaIndex);
   eachLeaf(layer, function (leaf) {
     if (!leaf.setStyle) return;
@@ -367,6 +379,10 @@ function* applySavedStyle(ds, st) {
   if (st.byField && datasetFields(ds).indexOf(st.byField.field) >= 0) {
     const mode = st.byField.mode === "ranges" && fieldIsNumeric(ds, st.byField.field) ? "ranges" : "categories";
     yield* colourBySteps(ds, st.byField.field, mode, st.byField.reverse);
+    if (ds.style.byField && Array.isArray(st.byField.hidden)) {
+      const valid = new Set(presentClassCodes(ds.style.byField));
+      st.byField.hidden.forEach(function (c) { if (valid.has(c)) ds.style.byField.hidden.add(c); });
+    }
   }
 }
 
@@ -576,6 +592,7 @@ function identify(layerPoint) {
     const layers = ds.layers;
     const candidates = ds.spatial.search(a.lng, b.lat, b.lng, a.lat);
     for (const i of candidates) {
+      if (isFeatureHiddenByClass(ds, i)) continue;
       if (layerContains(layers[i], layerPoint)) hits.push({ ds: ds, layer: layers[i] });
     }
   }
@@ -619,6 +636,17 @@ function stepHit(step) {
   if (STATE.hits.length < 2) return;
   clearHighlight();
   STATE.hitIndex = (STATE.hitIndex + step + STATE.hits.length) % STATE.hits.length;
+  showSelection();
+}
+
+function pruneHiddenSelection() {
+  if (!STATE.hits.length) return;
+  const kept = STATE.hits.filter(function (h) { return h.ds.visible && !isFeatureHiddenByClass(h.ds, h.layer._omaIndex); });
+  if (!kept.length) { clearSelection(); return; }
+  if (kept.length === STATE.hits.length) return;
+  clearHighlight();
+  STATE.hits = kept;
+  STATE.hitIndex = Math.min(STATE.hitIndex, kept.length - 1);
   showSelection();
 }
 
@@ -990,6 +1018,7 @@ async function loadFiles(files) {
       const stem = OmaParse.baseName(f.name);
       const key = stem.toLowerCase();
       if (!shapeSets.has(key)) shapeSets.set(key, { stem: stem, parts: {} });
+      if (ext === "shp") shapeSets.get(key).stem = stem;
       shapeSets.get(key).parts[ext] = f;
     } else singles.push(f);
   });
@@ -1067,7 +1096,9 @@ function buildProfile() {
         warnings: ds.warnings.slice(0, 20),
         style: {
           colour: st.colour, fillOpacity: st.fillOpacity, weight: st.weight, radius: st.radius, outline: st.outline,
-          byField: bf ? { field: bf.field, mode: bf.mode, reverse: bf.reverse } : null
+          byField: bf ? (bf.hidden && bf.hidden.size
+            ? { field: bf.field, mode: bf.mode, reverse: bf.reverse, hidden: Array.from(bf.hidden) }
+            : { field: bf.field, mode: bf.mode, reverse: bf.reverse }) : null
         },
         geojson: { type: "FeatureCollection", features: ds.features }
       };
@@ -1173,7 +1204,13 @@ function profileSaved(path) {
   setStatus("Saved profile " + name + ".");
 }
 
-window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, setHost: setHost, profileSaved: profileSaved, version: "0.3.3" };
+function exportSaved(path) {
+  const name = String(path || "").split("/").pop() || "export";
+  toast("Export saved", name, "ok");
+  setStatus("Exported " + name + ".");
+}
+
+window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, setHost: setHost, profileSaved: profileSaved, exportSaved: exportSaved, version: "0.3.3" };
 
 /* -------------------------------- Wiring --------------------------------- */
 function wireDragDrop() {

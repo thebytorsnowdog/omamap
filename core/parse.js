@@ -1686,7 +1686,11 @@
     };
     const bf = st.byField;
     if (bf && typeof bf === "object" && typeof bf.field === "string" && bf.field && FORBIDDEN_PROPERTY_NAMES.indexOf(bf.field) < 0) {
+      const hidden = Array.isArray(bf.hidden)
+        ? bf.hidden.filter(function (c) { return Number.isInteger(c) && ((c >= 0 && c < 24) || c === 32766 || c === 32767); }).slice(0, 26)
+        : [];
       out.byField = { field: bf.field.slice(0, LIMITS.propertyString), mode: bf.mode === "ranges" ? "ranges" : "categories", reverse: bf.reverse === true };
+      if (hidden.length) out.byField.hidden = Array.from(new Set(hidden));
     }
     return out;
   }
