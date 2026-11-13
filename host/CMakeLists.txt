@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(omamap VERSION 0.3.3 LANGUAGES CXX)
+project(omamap VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,6 +21,7 @@ add_executable(omamap
   recent.cpp recent.h
   scheme.cpp scheme.h
   regular_file.cpp regular_file.h
+  shapefile_companions.cpp shapefile_companions.h
   theme.cpp theme.h
   trusted_core.cpp trusted_core.h
   window.cpp window.h
@@ -59,6 +60,10 @@ if(BUILD_TESTING)
   add_executable(regular-file-test ../tests/regular-file.cpp regular_file.cpp)
   target_include_directories(regular-file-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME regular-file COMMAND regular-file-test)
+  add_executable(shapefile-companions-test ../tests/shapefile-companions.cpp shapefile_companions.cpp regular_file.cpp)
+  target_include_directories(shapefile-companions-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(shapefile-companions-test PRIVATE Qt6::Core)
+  add_test(NAME shapefile-companions COMMAND shapefile-companions-test)
 endif()
 
 install(TARGETS omamap RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

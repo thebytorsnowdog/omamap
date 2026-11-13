@@ -9,6 +9,102 @@
 const ROW_HEIGHT = 26;
 const TABLE_KEYS = { height: "omamap.tableHeight" };
 
+function csvSafeText(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
+  const s = typeof value === "object" ? JSON.stringify(value) : String(value);
+  if (/^[\t\r\n]*[=@]/.test(s)) return "'" + s;
+  if (/^[\t\r\n]*[+-]/.test(s) && numericValue(s) === null) return "'" + s;
+  return s;
+}
+
+function csvCell(value) {
+  const s = csvSafeText(value);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function hasCoordinateColumns(fields) {
+  const normal = fields.map(function (f) { return String(f).toLowerCase().trim().replace(/[\s_-]+/g, ""); });
+  const has = function (aliases) { return normal.some(function (n) { return aliases.indexOf(n) >= 0; }); };
+  return (has(["lat", "latitude", "gpsy", "wgs84lat", "wgs84latitude"]) && has(["lon", "lng", "long", "longitude", "gpsx", "wgs84lon", "wgs84longitude"]))
+    || (has(["easting", "eastings", "east", "bngeasting", "osgbeasting", "gridx"]) && has(["northing", "northings", "north", "bngnorthing", "osgbnorthing", "gridy"]))
+    || (has(["x", "xcoord", "xcoordinate"]) && has(["y", "ycoord", "ycoordinate"]));
+}
+
+function exportFileName(dsName, ext) {
+  const base = String(dsName || "export").replace(/[\x00-\x1f\x7f<>:"/\\|?*]+/g, " ").trim().slice(0, 120) || "export";
+  return base + "." + ext;
+}
+
+function createChunkSink(mime, label) {
+  const limit = typeof OmaParse !== "undefined" && OmaParse.LIMITS ? OmaParse.LIMITS.fileBytes : 100 * 1024 * 1024;
+  const encoder = new TextEncoder(), chunks = [];
+  let pending = "", bytes = 0;
+  function flush() {
+    if (!pending) return;
+    const chunk = encoder.encode(pending);
+    bytes += chunk.byteLength;
+    if (bytes > limit) throw new Error(label + " exceeds the 100 MiB file limit. Narrow the filter before exporting.");
+    chunks.push(chunk);
+    pending = "";
+  }
+  return {
+    append: function (text) { pending += text; if (pending.length >= 262144) flush(); },
+    finish: function () { flush(); return new Blob(chunks, { type: mime }); }
+  };
+}
+
+async function buildTableCsvBlob(ds, order) {
+  const fields = datasetFields(ds).slice();
+  const allPoints = order.length > 0 && order.every(function (i) {
+    return ds.features[i].geometry && ds.features[i].geometry.type === "Point";
+  });
+  let coordCols = null;
+  if (allPoints && !hasCoordinateColumns(fields)) {
+    coordCols = [
+      fields.indexOf("latitude") < 0 ? "latitude" : "wgs84_latitude",
+      fields.indexOf("longitude") < 0 ? "longitude" : "wgs84_longitude"
+    ];
+  }
+  const addGeomType = !fields.length && !coordCols;
+  const header = fields.concat(coordCols || []).concat(addGeomType ? ["geometry_type"] : []);
+  const sink = createChunkSink("text/csv;charset=utf-8", "CSV export");
+  sink.append(header.map(csvCell).join(",") + "\r\n");
+  let started = performance.now();
+  for (let k = 0; k < order.length; k++) {
+    const f = ds.features[order[k]], p = f.properties;
+    const cells = new Array(header.length);
+    for (let c = 0; c < fields.length; c++) cells[c] = csvCell(propOf(p, fields[c]));
+    if (coordCols) {
+      cells[fields.length] = csvCell(f.geometry.coordinates[1]);
+      cells[fields.length + 1] = csvCell(f.geometry.coordinates[0]);
+    } else if (addGeomType) {
+      cells[0] = csvCell(f.geometry && f.geometry.type);
+    }
+    sink.append(cells.join(",") + "\r\n");
+    if ((k & 255) === 0 && performance.now() - started >= 8) {
+      await new Promise(function (resolve) { setTimeout(resolve, 0); });
+      started = performance.now();
+    }
+  }
+  return sink.finish();
+}
+
+async function buildTableGeoJsonBlob(ds, order) {
+  const sink = createChunkSink("application/geo+json", "GeoJSON export");
+  sink.append('{"type":"FeatureCollection","features":[');
+  let started = performance.now();
+  for (let k = 0; k < order.length; k++) {
+    sink.append((k ? "," : "") + JSON.stringify(ds.features[order[k]]));
+    if ((k & 255) === 0 && performance.now() - started >= 8) {
+      await new Promise(function (resolve) { setTimeout(resolve, 0); });
+      started = performance.now();
+    }
+  }
+  sink.append("]}");
+  return sink.finish();
+}
+
 const Table = {
   ds: null,
   order: null,        // feature indices after search / view filter / sort
@@ -24,6 +120,13 @@ const Table = {
   drawn: null,        // { order, c0, c1 } the drawn rows were built for
   colEdges: null,     // header cell [left, right] in px, measured lazily
   pending: Promise.resolve(),
+  exporting: false,
+
+  syncExportButtons: function () {
+    const off = this.exporting || !this.order || !this.order.length;
+    el("tp-export-csv").disabled = off;
+    el("tp-export-geojson").disabled = off;
+  },
 
   isOpen: function () { return !el("table-panel").hidden; },
 
@@ -42,6 +145,7 @@ const Table = {
     this.ds = null;
     this.order = null;
     this.columns = [];
+    this.syncExportButtons();
     this.resetRows();
     el("tp-header").textContent = "";
     renderLayerList();
@@ -60,6 +164,7 @@ const Table = {
       this.revision++;
       cancelAnimationFrame(this.frame);
       this.ds = null; this.order = null; this.columns = [];
+      this.syncExportButtons();
       this.resetRows();
       el("tp-header").textContent = "";
     }
@@ -76,6 +181,7 @@ const Table = {
   show: function (ds) {
     this.ds = ds;
     this.order = null;
+    this.syncExportButtons();
     this.last = ds;
     this.sort = null;
     this.selected = -1;
@@ -195,6 +301,7 @@ const Table = {
       if (i % 256 === 0 && performance.now() - started > 8) {
         await pause(); if (this.revision !== revision || this.ds !== ds) return;
       }
+      if (typeof isFeatureHiddenByClass === "function" && isFeatureHiddenByClass(ds, i)) continue;
       if (q && this.rowText(i).indexOf(q) < 0) continue;
       if (visible && !visible(ds.layers[i])) continue;
       order.push(i);
@@ -244,6 +351,7 @@ const Table = {
     }
     if (this.revision !== revision || this.ds !== ds) return;
     this.order = order;
+    this.syncExportButtons();
     const count = el("tp-count");
     count.textContent = order.length === ds.features.length
       ? plural(order.length, "row")
@@ -403,10 +511,49 @@ const Table = {
     this.choose(this.order[pos], false);
   },
 
+  exportRows: async function (format) {
+    if (this.exporting) return;
+    await this.pending;
+    const ds = this.ds, order = this.order;
+    if (!ds || !order || !order.length) {
+      toast("Nothing to export", "No rows match the current filter.", "warn");
+      return;
+    }
+    const snapshot = order.slice();
+    const ext = format === "geojson" ? "geojson" : "csv";
+    const filename = exportFileName(ds.name, ext);
+    this.exporting = true;
+    this.syncExportButtons();
+    let blob;
+    try {
+      blob = ext === "geojson" ? await buildTableGeoJsonBlob(ds, snapshot) : await buildTableCsvBlob(ds, snapshot);
+    } catch (e) {
+      const msg = typeof OmaParse !== "undefined" && OmaParse.safeMessage ? OmaParse.safeMessage(e) : String(e && e.message || e);
+      toast("Could not export", msg, "err");
+      return;
+    } finally {
+      this.exporting = false;
+      this.syncExportButtons();
+    }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 60000);
+    if (!STATE.host) {
+      toast("Exported " + plural(snapshot.length, "row"), filename, "ok");
+      setStatus("Exported " + plural(snapshot.length, "row") + " to " + filename + ".");
+    }
+  },
+
   wire: function () {
     const saved = Number(storageGet(TABLE_KEYS.height));
     if (saved >= 120) el("table-panel").style.height = saved + "px";
     el("tp-close").addEventListener("click", () => this.close());
+    el("tp-export-csv").addEventListener("click", () => this.exportRows("csv"));
+    el("tp-export-geojson").addEventListener("click", () => this.exportRows("geojson"));
     el("tp-dataset").addEventListener("change", (e) => { const ds = findDs(e.target.value); if (ds) this.show(ds); });
     let searchTimer = 0;
     el("tp-search").addEventListener("input", (e) => {

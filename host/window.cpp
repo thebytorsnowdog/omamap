@@ -3,6 +3,7 @@
 #include "recent.h"
 #include "profile_save.h"
 #include "scheme.h"
+#include "shapefile_companions.h"
 #include "theme.h"
 
 #include <QApplication>
@@ -177,8 +178,8 @@ void Window::pushTheme()
     page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.applyTheme(%1);").arg(json));
 }
 
-// The page saves profiles as blob downloads; ask where to put them. Nothing
-// else may download.
+// The page saves profiles and table exports as blob downloads; ask where to
+// put them. Nothing else may download.
 void Window::saveDownload(QWebEngineDownloadRequest *download)
 {
     if (qEnvironmentVariableIsSet("OMAMAP_DEBUG"))
@@ -188,23 +189,55 @@ void Window::saveDownload(QWebEngineDownloadRequest *download)
         download->cancel();
         return;
     }
+
+    const QString suggested = QFileInfo(download->suggestedFileName()).fileName();
+    const QString lowerExt = QFileInfo(suggested).suffix().toLower();
+    QString requiredExt;
+    QString dialogTitle;
+    QString dialogFilter;
+    QString settingsKey;
+    QString stageName;
+    bool isProfile = false;
+    if (lowerExt == QLatin1String("omamap")) {
+        requiredExt = QStringLiteral(".omamap");
+        dialogTitle = QStringLiteral("Save OmaMap profile");
+        dialogFilter = QStringLiteral("OmaMap profile (*.omamap)");
+        settingsKey = QStringLiteral("profiles/lastDir");
+        stageName = QStringLiteral("profile.omamap");
+        isProfile = true;
+    } else if (lowerExt == QLatin1String("csv")) {
+        requiredExt = QStringLiteral(".csv");
+        dialogTitle = QStringLiteral("Export CSV");
+        dialogFilter = QStringLiteral("CSV files (*.csv)");
+        settingsKey = QStringLiteral("exports/lastDir");
+        stageName = QStringLiteral("export.csv");
+    } else if (lowerExt == QLatin1String("geojson")) {
+        requiredExt = QStringLiteral(".geojson");
+        dialogTitle = QStringLiteral("Export GeoJSON");
+        dialogFilter = QStringLiteral("GeoJSON files (*.geojson)");
+        settingsKey = QStringLiteral("exports/lastDir");
+        stageName = QStringLiteral("export.geojson");
+    } else {
+        download->cancel();
+        return;
+    }
+
     QSettings settings;
-    QString dir = settings.value(QStringLiteral("profiles/lastDir")).toString();
+    QString dir = settings.value(settingsKey).toString();
     if (dir.isEmpty() || !QFileInfo(dir).isDir()) dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     if (dir.isEmpty() || !QFileInfo(dir).isDir()) dir = QDir::homePath();
 
     QString target = qEnvironmentVariable("OMAMAP_SAVE_PATH");   // tests: no dialog
     const bool dialog = target.isEmpty();
     if (dialog) {
-        target = QFileDialog::getSaveFileName(this, QStringLiteral("Save OmaMap profile"),
-            QDir(dir).filePath(download->suggestedFileName()), QStringLiteral("OmaMap profile (*.omamap)"));
+        target = QFileDialog::getSaveFileName(this, dialogTitle, QDir(dir).filePath(suggested), dialogFilter);
     }
     if (target.isEmpty()) { download->cancel(); return; }
-    if (!target.endsWith(QLatin1String(".omamap"), Qt::CaseInsensitive)) {
-        target += QLatin1String(".omamap");
+    if (!target.endsWith(requiredExt, Qt::CaseInsensitive)) {
+        target += requiredExt;
         // The dialog confirmed replacing the name as typed, not this one.
         if (dialog && QFileInfo::exists(target)
-            && QMessageBox::question(this, QStringLiteral("Replace profile?"),
+            && QMessageBox::question(this, isProfile ? QStringLiteral("Replace profile?") : QStringLiteral("Replace file?"),
                    QStringLiteral("%1 already exists. Replace it?").arg(QFileInfo(target).fileName()),
                    QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
             download->cancel();
@@ -212,27 +245,31 @@ void Window::saveDownload(QWebEngineDownloadRequest *download)
         }
     }
     const QFileInfo info(target);
-    settings.setValue(QStringLiteral("profiles/lastDir"), info.absolutePath());
-    // Stage in a private directory on the destination filesystem. Keep the
-    // old profile until the complete replacement is durable and ready.
+    settings.setValue(settingsKey, info.absolutePath());
+    // Stage in a private directory on the destination filesystem. Keep any
+    // existing destination file until the complete replacement is durable.
     const auto staging = std::make_shared<QTemporaryDir>(info.absolutePath() + QStringLiteral("/.omamap-save-XXXXXX"));
+    const QString failToast = isProfile
+        ? QStringLiteral("toast('Could not save the profile', 'The file could not be written. Your previous profile is unchanged.', 'err');")
+        : QStringLiteral("toast('Could not export', 'The destination file could not be written.', 'err');");
     if (!staging->isValid()) {
         download->cancel();
-        page()->runJavaScript(QStringLiteral("toast('Could not save the profile', 'The destination cannot be written. Your previous profile is unchanged.', 'err');"));
+        page()->runJavaScript(failToast);
         return;
     }
     download->setDownloadDirectory(staging->path());
-    download->setDownloadFileName(QStringLiteral("profile.omamap"));
+    download->setDownloadFileName(stageName);
     const QString path = info.absoluteFilePath();
-    connect(download, &QWebEngineDownloadRequest::isFinishedChanged, this, [this, download, path, staging] {
+    connect(download, &QWebEngineDownloadRequest::isFinishedChanged, this, [this, download, path, staging, stageName, isProfile, failToast] {
         if (!download->isFinished()) return;
         if (download->state() == QWebEngineDownloadRequest::DownloadCompleted
-            && commitProfile(staging->filePath(QStringLiteral("profile.omamap")), path)) {
-            Recent::add(path);
+            && commitProfile(staging->filePath(stageName), path)) {
+            if (isProfile) Recent::add(path);
             const QString arg = QString::fromUtf8(QJsonDocument(QJsonArray{path}).toJson(QJsonDocument::Compact));
-            page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.profileSaved(%1[0]);").arg(arg));
+            const QString cb = isProfile ? QStringLiteral("profileSaved") : QStringLiteral("exportSaved");
+            page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.%1(%2[0]);").arg(cb, arg));
         } else {
-            page()->runJavaScript(QStringLiteral("toast('Could not save the profile', 'The file could not be written. Your previous profile is unchanged.', 'err');"));
+            page()->runJavaScript(failToast);
         }
         staging->remove();
     });
@@ -248,9 +285,11 @@ void Window::openFiles(const QStringList &paths)
 void Window::flush()
 {
     if (!m_ready || m_pending.isEmpty()) return;
+    const QStringList batch = expandShapefileCompanions(m_pending);
+    m_pending.clear();
     QJsonArray list;
     QStringList opened;
-    for (const QString &path : std::as_const(m_pending)) {
+    for (const QString &path : batch) {
         const QFileInfo info(path);
         if (!info.isFile() || !info.isReadable()) continue;
         opened << info.absoluteFilePath();
@@ -260,7 +299,6 @@ void Window::flush()
             {"size", static_cast<double>(info.size())},
         });
     }
-    m_pending.clear();
     if (list.isEmpty()) return;
     Recent::addMany(opened);   // one rewrite of the list per batch, not per file
     const QString json = QString::fromUtf8(QJsonDocument(list).toJson(QJsonDocument::Compact));

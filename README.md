@@ -90,6 +90,8 @@ Each dataset gets a colour from your theme. The ◐ button on a dataset opens it
 
 Empty values are counted separately as "Missing". Class colours follow your theme, so they change when you switch theme.
 
+Click any legend row to hide or show that class on the map, in click hit-testing and in the attribute table. Alt-click or double-click a legend row to isolate that class (and again, or **All**, to restore every class). Saved `.omamap` profiles preserve hidden legend classes.
+
 ### Attribute table
 
 ▦ on a dataset (or <kbd>T</kbd>) opens its full table under the map. Drag the top edge to resize it.
@@ -98,6 +100,7 @@ Empty values are counted separately as "Missing". Class colours follow your them
 - Search across all values, or tick **In view only** to list just the features in the current map view.
 - Click a row to select the feature and bring it into view. Double-click, or press <kbd>Enter</kbd>, to zoom to it. <kbd>↑</kbd> <kbd>↓</kbd> step through rows.
 - Selecting a feature on the map highlights its row.
+- Use **CSV** or **GeoJSON** in the table header to export the currently matched rows in their active sort order. Point datasets without coordinate attributes include `latitude` and `longitude` columns automatically, and string cells starting with spreadsheet formula prefixes are neutralised without altering negative numbers.
 
 The table draws only the rows on screen, so it stays quick with large datasets.
 
@@ -112,7 +115,7 @@ Fields from every feature are included, even when they first appear late in a da
 
 British National Grid data (EPSG:27700) is converted to WGS84 automatically, to within about 5 m (the same 7-parameter method PROJ uses without grid files). That covers easting/northing CSV, GeoJSON that declares EPSG:27700 (as older QGIS exports do), and shapefiles with a BNG `.prj`. CSV and GeoJSON conversions are noted in the dataset list.
 
-Open loose shapefile companions together, with the same filename stem: `omamap parcels.shp parcels.dbf parcels.prj parcels.cpg` (omit parts you do not have). Without `.prj`, coordinates are assumed to be WGS84 and a warning appears. A ZIP keeps the parts together when sharing or reopening the data. Arbitrary projected GeoJSON must be exported to WGS84 first; OmaMap is a viewer, not a geometry editor or general reprojection tool. Displayed lengths and areas use spherical approximations, and elevation is not included in length calculations.
+Open loose shapefile companions together with the same filename stem, or pass the `.shp` path to `omamap parcels.shp` (including from the Omarchy bar widget's recent list) so the desktop host discovers readable `.dbf`, `.prj` and `.cpg` siblings in the same directory automatically. Without `.prj`, coordinates are assumed to be WGS84 and a warning appears. A ZIP keeps the parts together when sharing the data. Arbitrary projected GeoJSON must be exported to WGS84 first; OmaMap is a viewer, not a geometry editor or general reprojection tool. Displayed lengths and areas use spherical approximations, and elevation is not included in length calculations.
 
 Imports are validated before anything reaches the map. Malformed geometry, unsafe property names, ZIP bombs, inconsistent archives and shapefile headers that don't fit their file are rejected with a reason. Most parsing runs in a background worker. KML and GPX need the page's XML parser, so conversion yields in short slices; initial XML parsing and final validation can still pause the window before Cancel takes effect.
 

@@ -235,6 +235,7 @@ const FastPoints = L.Layer.extend({
       if (x < minX || x > maxX || y < minY || y > maxY) return;
       const pt = pts[i];
       if (pt === this._front) return;
+      if (pt.options.fillOpacity <= 0 && (pt.options.weight <= 0 || pt.options.opacity <= 0)) return;
       if (!group || group.key !== pt._key) {
         flush();
         group = { key: pt._key, style: pt.options, xs: [], ys: [] };

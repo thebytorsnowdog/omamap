@@ -193,7 +193,7 @@ function classifyValue(byField, v) {
 function* colourBySteps(ds, field, mode, reverse) {
   if (!field) { ds.style.byField = null; ds.classOf = null; return; }
   const built = mode === "ranges" ? yield* buildRanges(ds, field) : yield* buildCategories(ds, field);
-  const byField = { field: field, mode: mode, reverse: !!reverse, classes: built.classes, colouring: built.colouring, index: new Map() };
+  const byField = { field: field, mode: mode, reverse: !!reverse, classes: built.classes, colouring: built.colouring, index: new Map(), hidden: new Set() };
   if (mode !== "ranges") built.classes.forEach(function (c, i) { byField.index.set(c.key, i); });
   const classOf = new Uint16Array(ds.features.length);
   let missing = 0, other = 0;
@@ -236,6 +236,7 @@ function paintColourBy(ds, field, mode, reverse) {
     if (many) setLoading(false);
     scheduleRestyle(ds);
     renderLayerList();
+    if (typeof Table !== "undefined" && Table.isOpen() && Table.ds === ds) Table.refilter();
   };
   step();
 }
@@ -466,7 +467,13 @@ function renderStyleEditor(ds) {
 
   const reset = document.createElement("button");
   reset.type = "button"; reset.className = "btn subtle"; reset.textContent = "Reset style";
-  reset.addEventListener("click", function () { ds.style = defaultStyle(ds); ds.classOf = null; scheduleRestyle(ds); renderLayerList(); });
+  reset.addEventListener("click", function () {
+    ds.style = defaultStyle(ds);
+    ds.classOf = null;
+    scheduleRestyle(ds);
+    renderLayerList();
+    if (typeof Table !== "undefined" && Table.isOpen() && Table.ds === ds) Table.refilter();
+  });
   const foot = document.createElement("div"); foot.className = "st-foot"; foot.appendChild(reset);
   box.appendChild(foot);
   return box;
@@ -494,11 +501,56 @@ function refreshSwatches() {
 
 let legendCollapsed = false;
 
+function presentClassCodes(bf) {
+  const codes = bf.classes.map(function (_, i) { return i; });
+  if (bf.otherCount) codes.push(CLASS_OTHER);
+  if (bf.missingCount) codes.push(CLASS_MISSING);
+  return codes;
+}
+
+function isFeatureHiddenByClass(ds, index) {
+  const bf = ds && ds.style && ds.style.byField;
+  return Boolean(bf && bf.hidden && bf.hidden.size && ds.classOf && bf.hidden.has(ds.classOf[index]));
+}
+
+function toggleLegendClass(ds, code, isolate) {
+  const bf = ds && ds.style && ds.style.byField;
+  if (!bf) return false;
+  if (!bf.hidden) bf.hidden = new Set();
+  const codes = presentClassCodes(bf);
+  if (isolate) {
+    const alreadyIsolated = codes.length > 1 && !bf.hidden.has(code) && bf.hidden.size === codes.length - 1;
+    bf.hidden = alreadyIsolated ? new Set() : new Set(codes.filter(function (c) { return c !== code; }));
+  } else if (bf.hidden.has(code)) {
+    bf.hidden.delete(code);
+  } else {
+    bf.hidden.add(code);
+  }
+  return true;
+}
+
+function resetLegendFilter(ds) {
+  const bf = ds && ds.style && ds.style.byField;
+  if (!bf || !bf.hidden || !bf.hidden.size) return false;
+  bf.hidden.clear();
+  return true;
+}
+
+function applyLegendChange(ds) {
+  if (typeof pruneHiddenSelection === "function") pruneHiddenSelection();
+  scheduleRestyle(ds);
+  if (typeof Table !== "undefined" && Table.isOpen() && Table.ds === ds) Table.refilter();
+}
+
 function renderLegend() {
   const box = el("legend");
   const styled = STATE.datasets.filter(function (ds) { return ds.visible && ds.style.byField; }).reverse();
   box.hidden = !styled.length;
   if (!styled.length) return;
+  const active = document.activeElement;
+  const focusKey = box.contains(active) && active.dataset && active.dataset.ds
+    ? { ds: active.dataset.ds, code: active.dataset.code }
+    : null;
   box.textContent = "";
   const head = document.createElement("div"); head.className = "lg-head";
   const title = document.createElement("span"); title.textContent = "Legend";
@@ -508,23 +560,67 @@ function renderLegend() {
   if (legendCollapsed) return;
   styled.forEach(function (ds) {
     const bf = ds.style.byField;
+    if (!bf.hidden) bf.hidden = new Set();
     const section = document.createElement("div"); section.className = "lg-section";
+    const sectionHead = document.createElement("div"); sectionHead.className = "lg-section-head";
     const t = document.createElement("div"); t.className = "lg-title";
     t.textContent = ds.name + " · " + bf.field;
-    section.appendChild(t);
-    const rows = bf.classes.map(function (c, i) { return { colour: classColour(bf, i), label: c.label, count: c.count }; });
-    if (bf.otherCount) rows.push({ colour: classColour(bf, CLASS_OTHER), label: "Other", count: bf.otherCount });
-    if (bf.missingCount) rows.push({ colour: classColour(bf, CLASS_MISSING), label: "Missing", count: bf.missingCount, muted: true });
+    sectionHead.appendChild(t);
+    if (bf.hidden.size) {
+      const allBtn = document.createElement("button");
+      allBtn.type = "button"; allBtn.className = "lg-reset"; allBtn.textContent = "All";
+      allBtn.title = "Show all classes in " + ds.name;
+      allBtn.addEventListener("click", function () {
+        if (resetLegendFilter(ds)) applyLegendChange(ds);
+      });
+      sectionHead.appendChild(allBtn);
+    }
+    section.appendChild(sectionHead);
+    const rows = bf.classes.map(function (c, i) { return { code: i, colour: classColour(bf, i), label: c.label, count: c.count }; });
+    if (bf.otherCount) rows.push({ code: CLASS_OTHER, colour: classColour(bf, CLASS_OTHER), label: "Other", count: bf.otherCount });
+    if (bf.missingCount) rows.push({ code: CLASS_MISSING, colour: classColour(bf, CLASS_MISSING), label: "Missing", count: bf.missingCount, muted: true });
     rows.forEach(function (r) {
-      const row = document.createElement("div"); row.className = "lg-row" + (r.muted ? " muted" : "");
+      const hidden = bf.hidden.has(r.code);
+      const row = document.createElement("div");
+      row.className = "lg-row" + (r.muted ? " muted" : "") + (hidden ? " off" : "");
+      row.setAttribute("role", "button");
+      row.tabIndex = 0;
+      row.setAttribute("aria-pressed", String(!hidden));
+      row.dataset.ds = ds.id;
+      row.dataset.code = String(r.code);
+      row.title = "Click to toggle · Alt-click or double-click to isolate";
       const sw = document.createElement("span"); sw.className = "lg-sw"; sw.style.background = r.colour;
       const label = document.createElement("span"); label.className = "lg-label"; label.textContent = r.label;
       const count = document.createElement("span"); count.className = "lg-count"; count.textContent = r.count.toLocaleString();
       row.appendChild(sw); row.appendChild(label); row.appendChild(count);
+      row.addEventListener("click", function (e) {
+        if (e.altKey) {
+          toggleLegendClass(ds, r.code, true);
+        } else if (e.detail >= 2) {
+          if (bf._beforeClick && bf._beforeClickCode === r.code) bf.hidden = new Set(bf._beforeClick);
+          toggleLegendClass(ds, r.code, true);
+        } else {
+          bf._beforeClick = new Set(bf.hidden);
+          bf._beforeClickCode = r.code;
+          toggleLegendClass(ds, r.code, false);
+        }
+        applyLegendChange(ds);
+      });
+      row.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          toggleLegendClass(ds, r.code, e.altKey);
+          applyLegendChange(ds);
+        }
+      });
       section.appendChild(row);
     });
     box.appendChild(section);
   });
+  if (focusKey) {
+    const match = box.querySelector('.lg-row[data-ds="' + focusKey.ds + '"][data-code="' + focusKey.code + '"]');
+    if (match) match.focus({ preventScroll: true });
+  }
 }
 
 function toggleLegend() { legendCollapsed = !legendCollapsed; renderLegend(); }

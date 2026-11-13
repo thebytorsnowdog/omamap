@@ -43,8 +43,11 @@ test("a saved profile is reported by file name", () => {
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "core", "app.js"), "utf8") + `
     profileSaved("/home/user/secret/clients/work.omamap");
     this.status = document.getElementById("status-text").textContent;
+    exportSaved("/home/user/secret/clients/filtered.csv");
+    this.exportStatus = document.getElementById("status-text").textContent;
   `, context);
   assert.equal(context.status, "Saved profile work.omamap.");
+  assert.equal(context.exportStatus, "Exported filtered.csv.");
 });
 
 test("Escape notifies search listeners after clearing a query", () => {
