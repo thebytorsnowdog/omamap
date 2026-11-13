@@ -1210,7 +1210,7 @@ function exportSaved(path) {
   setStatus("Exported " + name + ".");
 }
 
-window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, setHost: setHost, profileSaved: profileSaved, exportSaved: exportSaved, version: "0.3.3" };
+window.OmaMap = { applyTheme: applyTheme, openUrls: openUrls, setHost: setHost, profileSaved: profileSaved, exportSaved: exportSaved, version: "0.4.0" };
 
 /* -------------------------------- Wiring --------------------------------- */
 function wireDragDrop() {
