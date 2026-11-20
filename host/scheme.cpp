@@ -2,13 +2,13 @@
 
 #include "regular_file.h"
 
+#include <QBuffer>
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
 #include <QFileDevice>
 #include <QFileInfo>
 #include <QIODevice>
-#include <QMultiMap>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QUrl>
@@ -105,15 +105,20 @@ void SchemeHandler::registerScheme()
     QWebEngineUrlScheme::registerScheme(scheme);
 }
 
-QString SchemeHandler::shareFile(const QString &absolutePath)
+QString SchemeHandler::shareFile(const ImportFile &file, const QString &batch)
 {
     // Unguessable, so a URL for one opened file says nothing about others.
     quint32 words[4];
     QRandomGenerator::system()->fillRange(words);
     const QString token = QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(words), sizeof words).toHex());
-    m_files.insert(token, absolutePath);
-    const QString name = QString::fromUtf8(QUrl::toPercentEncoding(QFileInfo(absolutePath).fileName()));
+    m_files.insert(token, {file, batch});
+    const QString name = QString::fromUtf8(QUrl::toPercentEncoding(QFileInfo(file.path).fileName()));
     return QStringLiteral("%1://%2/file/%3/%4").arg(Scheme, Host, token, name);
+}
+
+QString SchemeHandler::releaseUrl(const QString &batch) const
+{
+    return QStringLiteral("%1://%2/release/%3").arg(Scheme, Host, batch);
 }
 
 void SchemeHandler::revokeAll()
@@ -142,24 +147,39 @@ void SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
         return;
     }
     const QString path = url.path(QUrl::FullyDecoded);
+    const QUrl from = job->initiator();
+    const bool fromApp = from.scheme() == QLatin1String(Scheme) && from.host() == QLatin1String(Host);
+
+    // The app releases unread tokens after each import, including cancelled
+    // or rejected sets that would otherwise retain their directory handles.
+    if (path.startsWith(QLatin1String("/release/"))) {
+        if (!fromApp) {
+            job->fail(QWebEngineUrlRequestJob::RequestDenied);
+            return;
+        }
+        const QString batch = path.mid(9);
+        m_files.removeIf([&](QHash<QString, SharedFile>::iterator entry) { return entry->batch == batch; });
+        auto *empty = new QBuffer(job);
+        empty->open(QIODevice::ReadOnly);
+        job->reply("application/octet-stream", empty);
+        return;
+    }
 
     // Opened files: omamap://app/file/<token>/<name>, for the app's own page only.
     static const QRegularExpression fileRoute(QStringLiteral("^/file/([0-9a-f]{32})/"));
     const auto match = fileRoute.match(path);
     if (match.hasMatch()) {
         const QString token = match.captured(1);
-        const QString target = m_files.value(token);
-        const QUrl from = job->initiator();
-        if (from.scheme() != QLatin1String(Scheme) || from.host() != QLatin1String(Host)) {
+        if (!fromApp) {
             job->fail(QWebEngineUrlRequestJob::RequestDenied);
             return;
         }
         // Open the inode itself. A path check followed by a later open is a
         // race: another local user who can replace the directory entry can
         // put a FIFO there, and QFile::open would block the UI thread.
-        const QByteArray native = QFile::encodeName(target);
+        const auto target = m_files.constFind(token);
         RegularFile opened{};
-        if (target.isEmpty() || !openRegularFile(native.constData(), &opened)) {
+        if (target == m_files.cend() || !target->file.open(&opened)) {
             job->fail(QWebEngineUrlRequestJob::UrlNotFound);
             return;
         }
@@ -170,7 +190,7 @@ void SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
         }
         // The page also checks the size it was told at open. This is the
         // check that still applies if the file was replaced since then.
-        if (file->size() < 0 || file->size() > openedFileLimit(target)) {
+        if (file->size() < 0 || file->size() > openedFileLimit(target->file.path)) {
             file->close();
             job->fail(QWebEngineUrlRequestJob::RequestDenied);
             return;

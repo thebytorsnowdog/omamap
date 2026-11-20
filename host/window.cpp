@@ -3,7 +3,6 @@
 #include "recent.h"
 #include "profile_save.h"
 #include "scheme.h"
-#include "shapefile_companions.h"
 #include "theme.h"
 
 #include <QApplication>
@@ -11,6 +10,7 @@
 #include <QDateTime>
 #include <QTimer>
 #include <QTemporaryDir>
+#include <QUuid>
 #include <memory>
 #include <QDesktopServices>
 #include <QDir>
@@ -77,13 +77,13 @@ bool Page::acceptNavigationRequest(const QUrl &url, NavigationType type, bool is
     return false;
 }
 
-// The page's file picker: the default Qt dialog, with chosen files remembered
-// for the recent list.
+// Keep the paths from the native picker so the import bridge can distinguish
+// same-stem shapefile parts in different directories.
 QStringList Page::chooseFiles(FileSelectionMode mode, const QStringList &oldFiles, const QStringList &acceptedMimeTypes)
 {
     const QStringList chosen = QWebEnginePage::chooseFiles(mode, oldFiles, acceptedMimeTypes);
-    Recent::addMany(chosen);
-    return chosen;
+    if (!chosen.isEmpty()) emit filesChosen(chosen);
+    return {};
 }
 
 void Page::javaScriptConsoleMessage(JavaScriptConsoleMessageLevel level, const QString &message,
@@ -127,6 +127,12 @@ Window::Window(QWebEngineProfile *profile, SchemeHandler *scheme, ThemeWatcher *
     setWindowTitle(QStringLiteral("OmaMap"));
     resize(1440, 900);
 
+    connect(page, &Page::filesChosen, this, [this](const QStringList &paths) {
+        const QString error = openFiles(paths);
+        if (error.isEmpty()) return;
+        const QString json = QString::fromUtf8(QJsonDocument(QJsonArray{error}).toJson(QJsonDocument::Compact));
+        this->page()->runJavaScript(QStringLiteral("toast('Could not open files', %1[0], 'err');").arg(json));
+    });
     connect(page, &QWebEnginePage::loadFinished, this, [this](bool ok) {
         if (!ok) return;
         m_ready = true;
@@ -276,33 +282,44 @@ void Window::saveDownload(QWebEngineDownloadRequest *download)
     download->accept();
 }
 
-void Window::openFiles(const QStringList &paths)
+QString Window::openFiles(const QStringList &paths)
 {
-    m_pending << paths;
+    auto batch = expandShapefileCompanions(paths);
+    if (!batch.error.isEmpty()) return batch.error;
+    queueFiles(std::move(batch.files));
+    return {};
+}
+
+void Window::queueFiles(QList<ImportFile> files)
+{
+    if (files.isEmpty()) return;
+    m_pending.append(std::move(files));
     flush();
 }
 
 void Window::flush()
 {
-    if (!m_ready || m_pending.isEmpty()) return;
-    const QStringList batch = expandShapefileCompanions(m_pending);
-    m_pending.clear();
-    QJsonArray list;
-    QStringList opened;
-    for (const QString &path : batch) {
-        const QFileInfo info(path);
-        if (!info.isFile() || !info.isReadable()) continue;
-        opened << info.absoluteFilePath();
-        list.append(QJsonObject{
-            {"url", m_scheme->shareFile(info.absoluteFilePath())},
-            {"name", info.fileName()},
-            {"size", static_cast<double>(info.size())},
-        });
+    if (!m_ready) return;
+    while (!m_pending.isEmpty()) {
+        const auto batch = m_pending.takeFirst();
+        const QString batchId = QUuid::createUuid().toString(QUuid::Id128);
+        QJsonArray list;
+        QStringList opened;
+        for (const auto &file : batch) {
+            opened << file.path;
+            QJsonObject item{
+                {"url", m_scheme->shareFile(file, batchId)},
+                {"name", QFileInfo(file.path).fileName()},
+                {"size", static_cast<double>(file.size)},
+            };
+            if (file.shapeGroup >= 0) item.insert("shapeGroup", file.shapeGroup);
+            list.append(item);
+        }
+        Recent::addMany(opened);
+        const QJsonArray args{list, m_scheme->releaseUrl(batchId)};
+        const QString json = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
+        page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.openUrls(...%1);").arg(json));
     }
-    if (list.isEmpty()) return;
-    Recent::addMany(opened);   // one rewrite of the list per batch, not per file
-    const QString json = QString::fromUtf8(QJsonDocument(list).toJson(QJsonDocument::Compact));
-    page()->runJavaScript(QStringLiteral("window.OmaMap && window.OmaMap.openUrls(%1);").arg(json));
 }
 
 // Test completion follows the requested page condition, not a guessed load

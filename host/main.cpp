@@ -13,14 +13,18 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QUrl>
 #include <QWebEngineProfile>
+#include <memory>
+#include <optional>
 
 #ifdef Q_OS_LINUX
 #include <sys/socket.h>
@@ -67,51 +71,38 @@ static QString socketPath()
         static const QRegularExpression unsafe(QStringLiteral("[^A-Za-z0-9._-]"));
         name += QLatin1Char('-') + QString(instance).replace(unsafe, QStringLiteral("_")).left(64);
     }
-    return dir + QLatin1Char('/') + name + QStringLiteral(".sock");
+    // Older instances process paths as they arrive and cannot acknowledge a
+    // batch. Keep their socket separate so an upgraded launcher can open it
+    // with the matching host and renderer.
+    return dir + QLatin1Char('/') + name + QStringLiteral(".v2.sock");
 }
 
-// Messages are one file:// URL per line. Percent-encoding keeps a file name
-// containing a newline (legal on Linux) from turning into two paths.
-// The running window accepts at most IpcMaxPaths of them, and at most
-// IpcMaxPendingBytes of text (see takeIpcLines).
-
-static QStringList limitFiles(const QStringList &files)
+// No value means there is no connection. Once connected, report any failure
+// to the caller so a handoff is never retried as a separate import.
+static std::optional<QString> forwardToRunningInstance(const QString &path, const QStringList &files)
 {
-    if (files.size() <= IpcMaxPaths) return files;
-    qWarning("omamap: opening the first %d of %lld files", IpcMaxPaths, static_cast<long long>(files.size()));
-    return files.mid(0, IpcMaxPaths);
-}
-
-// Returns true if a running OmaMap accepted the files.
-static bool forwardToRunningInstance(const QString &path, const QStringList &files)
-{
-    if (path.isEmpty()) return false;
+    if (path.isEmpty()) return std::nullopt;
     QLocalSocket socket;
     socket.connectToServer(path);
-    if (!socket.waitForConnected(300)) return false;
+    if (!socket.waitForConnected(300)) return std::nullopt;
     QByteArray message;
-    qint64 bytes = 0;
-    int count = 0;
-    for (const QString &file : files) {
-        if (count >= IpcMaxPaths) break;
-        const QByteArray encoded = QUrl::fromLocalFile(file).toEncoded() + '\n';
-        if (encoded.size() > IpcMaxPendingBytes || bytes > IpcMaxPendingBytes - encoded.size()) {
-            if (count > 0) qWarning("omamap: sent the first %d files; the rest did not fit in one message", count);
-            break;
-        }
-        message += encoded;
-        bytes += encoded.size();
-        count++;
-    }
-    // Nothing fit (one absurdly long path). Open it in this process instead
-    // of raising the existing window and dropping the file.
-    if (count == 0 && !files.isEmpty()) return false;
-    if (message.isEmpty()) message = "\n";   // just raise the window
-    socket.write(message);
+    if (!makeIpcMessage(files, message))
+        return QStringLiteral("The launch request exceeds 1 MiB. Select fewer files per launch.");
+    if (socket.write(message) != message.size())
+        return QStringLiteral("Could not send files to the running window.");
     socket.flush();
-    socket.waitForBytesWritten(1000);
-    socket.disconnectFromServer();
-    return true;
+
+    QElapsedTimer timer;
+    timer.start();
+    while (!socket.canReadLine()) {
+        const qint64 remaining = 5000 - timer.elapsed();
+        if (remaining <= 0 || !socket.waitForReadyRead(static_cast<int>(remaining))) break;
+    }
+    if (!socket.canReadLine()) return QStringLiteral("The running window did not acknowledge the launch request.");
+    const QByteArray reply = socket.readLine();
+    if (reply == "OK\n") return QString{};
+    if (reply.startsWith("ERROR ")) return QString::fromUtf8(reply.mid(6).trimmed());
+    return QStringLiteral("The running window sent an invalid launch response.");
 }
 
 // True if the connecting process runs as this user. The socket's directory
@@ -168,12 +159,24 @@ int main(int argc, char *argv[])
         const QString path = url.isLocalFile() ? url.toLocalFile() : arg;
         files << QFileInfo(path).absoluteFilePath();
     }
-    files = limitFiles(files);
 
     const QString socket = socketPath();
-    if (!parser.isSet(newInstance) && forwardToRunningInstance(socket, files)) {
-        focusWindow();
-        return 0;
+    if (!parser.isSet(newInstance)) {
+        const auto result = forwardToRunningInstance(socket, files);
+        if (result) {
+            if (result->isEmpty()) {
+                focusWindow();
+                return 0;
+            }
+            qCritical("omamap: %s", qPrintable(*result));
+            return 1;
+        }
+    }
+
+    auto initialBatch = expandShapefileCompanions(files);
+    if (!initialBatch.error.isEmpty()) {
+        qCritical("omamap: %s", qPrintable(initialBatch.error));
+        return 1;
     }
 
     const QString core = coreDirectory();
@@ -196,6 +199,7 @@ int main(int argc, char *argv[])
 
     ThemeWatcher theme;
     Window window(profile, scheme, &theme);
+    window.queueFiles(std::move(initialBatch.files));
 
     QLocalServer server;
     if (!parser.isSet(newInstance) && !socket.isEmpty()) {
@@ -206,23 +210,30 @@ int main(int argc, char *argv[])
             while (QLocalSocket *client = server.nextPendingConnection()) {
                 QObject::connect(client, &QLocalSocket::disconnected, client, &QObject::deleteLater);
                 if (!sameUser(client)) { client->abort(); continue; }
-                QObject::connect(client, &QLocalSocket::readyRead, &window, [client, &window] {
-                    // Wait for complete lines. A partial line stays buffered;
-                    // a line past the cap closes the connection instead of
-                    // being copied into memory.
-                    const IpcTake taken = takeIpcLines(client, client->property("ipcPaths").toInt(), client->property("ipcBytes").toLongLong());
-                    client->setProperty("ipcPaths", taken.received);
-                    client->setProperty("ipcBytes", taken.consumed);
-                    if (!taken.paths.isEmpty()) window.openFiles(taken.paths);
-                    window.raise();
-                    window.activateWindow();
-                    if (taken.abort) client->abort();
-                });
+                client->setReadBufferSize(IpcMaxPendingBytes + 1);
+                QTimer::singleShot(10000, client, [client] { client->abort(); });
+                const auto pending = std::make_shared<QByteArray>();
+                const auto receive = [client, &window, pending] {
+                    if (client->state() != QLocalSocket::ConnectedState) return;
+                    const IpcTake taken = takeIpcMessage(*pending, client->readAll());
+                    if (!taken.complete) return;
+                    const QString error = taken.error.isEmpty() ? window.openFiles(taken.paths) : taken.error;
+                    if (error.isEmpty()) {
+                        window.raise();
+                        window.activateWindow();
+                        client->write("OK\n");
+                    } else {
+                        client->write("ERROR " + error.toUtf8() + '\n');
+                    }
+                    client->disconnectFromServer();
+                };
+                QObject::connect(client, &QLocalSocket::readyRead, &window, receive);
+                // A client can send its message before newConnection runs.
+                if (client->bytesAvailable()) receive();
             }
         });
     }
 
-    window.openFiles(files);
     window.show();
     return app.exec();
 }

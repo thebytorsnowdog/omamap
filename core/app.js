@@ -8,13 +8,15 @@
 
 const MAX_DATASETS = 50;
 const MAX_FILES_PER_DROP = 100;
-const STORAGE_KEYS = { basemap: "omamap.basemap", view: "omamap.view" };
+// Before 0.4.0-2, profiles could write omamap.basemap. Only choices made
+// through the basemap controls are written to the new key.
+const STORAGE_KEYS = { basemap: "omamap.tileBasemap", view: "omamap.view" };
 
 const STATE = {
   map: null,
   renderer: null,
   baseLayer: null,
-  basemapPref: "auto",    // "auto" follows the theme: light or dark
+  basemapPref: "none",
   basemapId: null,        // effective basemap
   mode: "dark",
   palette: [],
@@ -120,7 +122,6 @@ function applyTheme(theme) {
   if (typeof Table !== "undefined" && Table.onThemeChanged) Table.onThemeChanged();
   renderLayerList();
   renderLegend();
-  if (STATE.map) setBasemap(STATE.basemapPref, false);
 }
 
 function datasetColour(ds) {
@@ -128,15 +129,10 @@ function datasetColour(ds) {
 }
 
 /* ------------------------------ Basemaps --------------------------------- */
-function effectiveBasemap(pref) {
-  if (pref === "auto") return STATE.mode === "light" ? "light" : "dark";
-  return OMAMAP_BASEMAPS.some(function (b) { return b.id === pref; }) ? pref : "dark";
-}
-
 function setBasemap(pref, remember) {
   STATE.basemapPref = pref;
   if (remember) storageSet(STORAGE_KEYS.basemap, pref);
-  const id = effectiveBasemap(pref);
+  const id = pref;
   if (id !== STATE.basemapId) {
     if (STATE.baseLayer) STATE.map.removeLayer(STATE.baseLayer);
     STATE.baseLayer = null;
@@ -997,8 +993,12 @@ async function parseShapefileSet(stem, group) {
    Batches load one after another, so a second drop waits for the first. */
 let loadQueue = Promise.resolve();
 let cancelledLoad = false;
-function handleFiles(fileList) {
+function handleFiles(fileList, nativeBatch = false) {
   const files = Array.from(fileList || []).filter(Boolean);
+  if (!nativeBatch && files.length > MAX_FILES_PER_DROP) {
+    toast("Too many files", "Add at most " + MAX_FILES_PER_DROP + " files at once.", "err");
+    return Promise.resolve();
+  }
   const run = loadQueue.then(function () { return loadFiles(files); });
   loadQueue = run.catch(function () {});
   return run;
@@ -1007,23 +1007,29 @@ function handleFiles(fileList) {
 async function loadFiles(files) {
   cancelledLoad = false;
   if (!files.length) return;
-  if (files.length > MAX_FILES_PER_DROP) { toast("Too many files", "Add at most " + MAX_FILES_PER_DROP + " files at once.", "err"); return; }
 
-  // Loose shapefile parts (.shp + .dbf + .prj + .cpg) are grouped by name.
+  // The native host supplies group IDs scoped to each parent and stem.
+  // Browser File objects only supply a basename, so reject ambiguous sets.
   const shapeSets = new Map();
   const singles = [];
   files.forEach(function (f) {
     const ext = OmaParse.extOf(f.name);
     if (OmaParse.SHAPE_PARTS.indexOf(ext) >= 0) {
       const stem = OmaParse.baseName(f.name);
-      const key = stem.toLowerCase();
-      if (!shapeSets.has(key)) shapeSets.set(key, { stem: stem, parts: {} });
-      if (ext === "shp") shapeSets.get(key).stem = stem;
-      shapeSets.get(key).parts[ext] = f;
+      const key = f.shapeGroup ?? stem.toLowerCase();
+      if (!shapeSets.has(key)) shapeSets.set(key, { stem: stem, parts: {}, duplicate: false });
+      const set = shapeSets.get(key);
+      if (ext === "shp") set.stem = stem;
+      if (set.parts[ext]) set.duplicate = true;
+      else set.parts[ext] = f;
     } else singles.push(f);
   });
   const jobs = singles.map(function (f) { return { label: f.name, run: function () { return parseOne(f); } }; });
   shapeSets.forEach(function (set) {
+    if (set.duplicate) {
+      toast("Skipped " + set.stem + ".shp", "Multiple files match the same shapefile component. Select one of each part.", "warn");
+      return;
+    }
     if (!set.parts.shp) {
       toast("Skipped " + Object.keys(set.parts).map(function (e) { return set.stem + "." + e; }).join(", "), "No matching .shp file was included.", "warn");
       return;
@@ -1076,7 +1082,8 @@ async function loadFiles(files) {
 
 /* ------------------------------- Profiles -------------------------------- */
 /* A profile saves the workspace: every dataset with its data, style,
-   visibility and stacking order, plus the map view and basemap. */
+   visibility and stacking order, plus the map view. Keep the basemap field
+   for readers of the existing profile format. */
 
 function buildProfile() {
   const c = STATE.map.getCenter();
@@ -1156,7 +1163,6 @@ async function restoreProfile(profile) {
   staged.forEach(attachDataset);
   const added = staged;
   STATE.nextSlot = STATE.datasets.reduce(function (m, d) { return Math.max(m, d.slot + 1); }, 0);
-  if (profile.basemap && (profile.basemap === "auto" || OMAMAP_BASEMAPS.some(function (b) { return b.id === profile.basemap; }))) setBasemap(profile.basemap, true);
   if (profile.view) STATE.map.setView([profile.view.lat, profile.view.lng], profile.view.zoom);
   else fitAll();
   renderLayerList();
@@ -1169,12 +1175,13 @@ async function restoreProfile(profile) {
 /* ------------------------------ Host bridge ------------------------------ */
 /* The native host serves files the user opened (CLI, file manager) at
    same-origin URLs and calls openUrls() with them. */
-function openUrls(list) {
+function openUrls(list, releaseUrl) {
   const files = (Array.isArray(list) ? list : []).filter(function (item) {
     return item && typeof item.url === "string" && typeof item.name === "string";
   }).map(function (item) {
     return {
       name: item.name,
+      shapeGroup: Number.isInteger(item.shapeGroup) ? item.shapeGroup : undefined,
       size: typeof item.size === "number" ? item.size : undefined,
       arrayBuffer: function () {
         return fetch(item.url).then(function (r) {
@@ -1191,7 +1198,14 @@ function openUrls(list) {
       }
     };
   });
-  return handleFiles(files);
+  const nativeBatch = typeof releaseUrl === "string";
+  const run = handleFiles(files, nativeBatch);
+  if (nativeBatch) {
+    // Discard unread URLs after skips, cancellation or parse errors.
+    const release = function () { return fetch(releaseUrl).catch(function () {}); };
+    run.then(release, release);
+  }
+  return run;
 }
 
 // Called by the desktop app when it starts and after it saves a profile.
@@ -1300,7 +1314,7 @@ function initMap() {
 
 function boot() {
   const pref = storageGet(STORAGE_KEYS.basemap);
-  STATE.basemapPref = pref && (pref === "auto" || OMAMAP_BASEMAPS.some(function (b) { return b.id === pref; })) ? pref : "auto";
+  STATE.basemapPref = OMAMAP_BASEMAPS.some(function (b) { return b.id === pref; }) ? pref : "none";
   renderBasemapButtons();
   initMap();
   applyTheme({});   // fallback colours until the host sends the Omarchy theme

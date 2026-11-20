@@ -25,9 +25,13 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm test
+  vendor:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/vendor-security.yml
   checks:
     name: OmaMap checks
-    needs: unit
+    needs: [unit, vendor]
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     container:
@@ -42,6 +46,20 @@ jobs:
       # installed application never disables the WebEngine sandbox.
       QTWEBENGINE_DISABLE_SANDBOX: '1'
     steps:
+      - name: Require prerequisite checks
+        env:
+          EVENT: ${{ github.event_name }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          VENDOR_RESULT: ${{ needs.vendor.result }}
+        run: |
+          if [ "$UNIT_RESULT" != success ]; then
+            echo "JavaScript checks ended with $UNIT_RESULT."
+            exit 1
+          fi
+          if [ "$EVENT" = pull_request ] && [ "$VENDOR_RESULT" != success ]; then
+            echo "Vendored dependency security ended with $VENDOR_RESULT."
+            exit 1
+          fi
       - name: Install build and test dependencies
         run: pacman -Syu --noconfirm --needed git cmake qt6-base qt6-webengine nodejs npm chromium jq python mesa xorg-server-xvfb xorg-xauth ttf-dejavu dbus
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,7 +73,9 @@ jobs:
       - run: cmake --build build --parallel 2
       - run: ctest --test-dir build --output-on-failure
       - name: Native host smoke tests
-        run: xvfb-run -a dbus-run-session -- tests/host-smoke.sh
+        run: |
+          xvfb-run -a dbus-run-session -- tests/host-smoke.sh
+          xvfb-run -a dbus-run-session -- tests/omamap-host.sh
         env:
           QT_QPA_PLATFORM: xcb
           LIBGL_ALWAYS_SOFTWARE: '1'

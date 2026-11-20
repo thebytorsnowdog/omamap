@@ -120,6 +120,7 @@ const Table = {
   drawn: null,        // { order, c0, c1 } the drawn rows were built for
   colEdges: null,     // header cell [left, right] in px, measured lazily
   pending: Promise.resolve(),
+  searchTimer: 0,
   exporting: false,
 
   syncExportButtons: function () {
@@ -284,6 +285,8 @@ const Table = {
   },
 
   refilter: function () {
+    clearTimeout(this.searchTimer);
+    this.searchTimer = 0;
     this.pending = this.computeOrder();
     return this.pending;
   },
@@ -513,19 +516,24 @@ const Table = {
 
   exportRows: async function (format) {
     if (this.exporting) return;
-    await this.pending;
-    const ds = this.ds, order = this.order;
-    if (!ds || !order || !order.length) {
-      toast("Nothing to export", "No rows match the current filter.", "warn");
-      return;
-    }
-    const snapshot = order.slice();
-    const ext = format === "geojson" ? "geojson" : "csv";
-    const filename = exportFileName(ds.name, ext);
     this.exporting = true;
     this.syncExportButtons();
-    let blob;
+    const ds = this.ds;
+    const ext = format === "geojson" ? "geojson" : "csv";
+    let blob, filename, snapshot;
     try {
+      let pending;
+      do {
+        pending = this.searchTimer ? this.refilter() : this.pending;
+        await pending;
+      } while (this.ds === ds && (this.searchTimer || this.pending !== pending));
+      if (this.ds !== ds) return;
+      if (!ds || !this.order || !this.order.length) {
+        toast("Nothing to export", "No rows match the current filter.", "warn");
+        return;
+      }
+      snapshot = this.order.slice();
+      filename = exportFileName(ds.name, ext);
       blob = ext === "geojson" ? await buildTableGeoJsonBlob(ds, snapshot) : await buildTableCsvBlob(ds, snapshot);
     } catch (e) {
       const msg = typeof OmaParse !== "undefined" && OmaParse.safeMessage ? OmaParse.safeMessage(e) : String(e && e.message || e);
@@ -555,11 +563,10 @@ const Table = {
     el("tp-export-csv").addEventListener("click", () => this.exportRows("csv"));
     el("tp-export-geojson").addEventListener("click", () => this.exportRows("geojson"));
     el("tp-dataset").addEventListener("change", (e) => { const ds = findDs(e.target.value); if (ds) this.show(ds); });
-    let searchTimer = 0;
     el("tp-search").addEventListener("input", (e) => {
       this.query = e.target.value;
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => this.refilter(), 120);
+      clearTimeout(this.searchTimer);
+      this.searchTimer = setTimeout(() => this.refilter(), 120);
     });
     el("tp-inview").addEventListener("change", (e) => { this.inView = e.target.checked; this.refilter(); });
     STATE.map.on("moveend", () => { if (this.isOpen() && this.inView) this.refilter(); });

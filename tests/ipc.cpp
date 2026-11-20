@@ -1,8 +1,5 @@
-// takeIpcLines: bounded local messages, absolute file URLs only.
 #include "ipc.h"
 
-#include <QBuffer>
-#include <QUrl>
 #include <cstdio>
 
 static bool check(bool ok, const char *label)
@@ -13,61 +10,39 @@ static bool check(bool ok, const char *label)
 
 int main()
 {
-    {
-        QBuffer buf;
-        buf.open(QIODevice::ReadWrite);
-        buf.write(QUrl::fromLocalFile("/tmp/a.geojson").toEncoded() + "\n\n");
-        buf.seek(0);
-        const IpcTake taken = takeIpcLines(&buf, 0, 0);
-        if (!check(!taken.abort && taken.paths == QStringList{"/tmp/a.geojson"} && taken.received == 1, "accepts one path and skips a blank line")) return 1;
+    QByteArray message, pending;
+    const QStringList paths{"/tmp/a.geojson", "/tmp/one\ntwo.shp", "/tmp/one\ntwo.dbf"};
+    if (!check(makeIpcMessage(paths, message), "encodes a batch")) return 1;
+    for (qsizetype i = 0; i < message.size() - 1; ++i) {
+        const auto partial = takeIpcMessage(pending, message.sliced(i, 1));
+        if (!check(!partial.complete && partial.paths.isEmpty(), "partial reads do not publish any paths")) return 1;
     }
-    {
-        QBuffer buf;
-        buf.open(QIODevice::ReadWrite);
-        buf.write(QByteArray(int(IpcMaxPendingBytes) + 64, 'a'));
-        buf.write("\n");
-        buf.seek(0);
-        const IpcTake taken = takeIpcLines(&buf, 0, 0);
-        if (!check(taken.abort && taken.paths.isEmpty(), "rejects an over-long line")) return 1;
-        if (!check(buf.bytesAvailable() > IpcMaxPendingBytes, "leaves the over-long line unread")) return 1;
+    const auto full = takeIpcMessage(pending, message.last(1));
+    if (!check(full.complete && full.error.isEmpty() && full.paths == paths, "accepts one complete batch with odd filenames")) return 1;
+
+    pending.clear();
+    if (!check(makeIpcMessage({}, message), "encodes a request to raise the window")) return 1;
+    const auto raise = takeIpcMessage(pending, message);
+    if (!check(raise.complete && raise.error.isEmpty() && raise.paths.isEmpty(), "accepts a request to raise the window")) return 1;
+
+    pending.clear();
+    const auto partial = takeIpcMessage(pending, QByteArray(IpcMaxPendingBytes, 'x'));
+    if (!check(!partial.complete, "keeps a bounded incomplete request")) return 1;
+    const auto oversized = takeIpcMessage(pending, QByteArray(1, '\0'));
+    if (!check(oversized.complete && !oversized.error.isEmpty() && oversized.paths.isEmpty(), "rejects the entire oversized request")) return 1;
+    const QString tooLong = "/tmp/" + QString(IpcMaxPendingBytes, QLatin1Char('x'));
+    if (!check(!makeIpcMessage({"/tmp/a.geojson", tooLong}, message) && message.isEmpty(), "sender does not truncate an oversized request")) return 1;
+
+    for (const QByteArray &line : {"https://example.invalid/a\n", "file:relative\n", "not-a-url\n", "file:///tmp/a", "file:///tmp/a%00b\n"}) {
+        pending.clear();
+        const auto invalid = takeIpcMessage(pending, "file:///tmp/valid\n" + line + '\0');
+        if (!check(invalid.complete && !invalid.error.isEmpty() && invalid.paths.isEmpty(), "malformed lines reject the batch")) return 1;
     }
-    {
-        QBuffer buf;
-        buf.open(QIODevice::ReadWrite);
-        QByteArray message;
-        for (int i = 0; i < IpcMaxPaths + 5; ++i)
-            message += QUrl::fromLocalFile(QStringLiteral("/tmp/f%1.geojson").arg(i)).toEncoded() + '\n';
-        buf.write(message);
-        buf.seek(0);
-        const IpcTake taken = takeIpcLines(&buf, 0, 0);
-        if (!check(!taken.abort && taken.received == IpcMaxPaths && taken.paths.size() == IpcMaxPaths, "stops accepting paths at the cap")) return 1;
-        if (!check(buf.bytesAvailable() == 0, "still drains the extra short lines")) return 1;
-    }
-    {
-        QBuffer buf;
-        buf.open(QIODevice::ReadWrite);
-        const QString path = QStringLiteral("/tmp/") + QString(20000, QLatin1Char('a')) + QStringLiteral(".geojson");
-        const QByteArray line = QUrl::fromLocalFile(path).toEncoded() + '\n';
-        QByteArray message;
-        int written = 0;
-        while (message.size() <= IpcMaxPendingBytes) {
-            message += line;
-            written++;
-        }
-        message += line; // one more complete line past the cap
-        buf.write(message);
-        buf.seek(0);
-        const IpcTake taken = takeIpcLines(&buf, 0, 0);
-        if (!check(taken.abort && taken.received > 0 && taken.received < written && taken.received <= IpcMaxPaths, "stops once the byte cap is reached")) return 1;
-        if (!check(taken.consumed <= IpcMaxPendingBytes + line.size() && buf.bytesAvailable() >= line.size(), "does not read past the capped line")) return 1;
-    }
-    {
-        QBuffer buf;
-        buf.open(QIODevice::ReadWrite);
-        buf.write("https://example.invalid/a\nfile:relative\nnot-a-url\n");
-        buf.seek(0);
-        const IpcTake taken = takeIpcLines(&buf, 0, 0);
-        if (!check(!taken.abort && taken.paths.isEmpty() && taken.received == 0, "ignores anything that is not an absolute file URL")) return 1;
-    }
+
+    pending.clear();
+    makeIpcMessage(paths, message);
+    const auto trailing = takeIpcMessage(pending, message + "trailing");
+    if (!check(trailing.complete && !trailing.error.isEmpty() && trailing.paths.isEmpty(), "rejects bytes after the terminator")) return 1;
+
     return 0;
 }

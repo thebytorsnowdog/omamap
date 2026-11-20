@@ -1,5 +1,7 @@
 #pragma once
 
+#include "shapefile_companions.h"
+
 #include <QStringList>
 #include <QWebEnginePage>
 #include <QWebEngineView>
@@ -15,6 +17,9 @@ class Page : public QWebEnginePage
 public:
     explicit Page(QWebEngineProfile *profile, QObject *parent = nullptr);
 
+signals:
+    void filesChosen(const QStringList &paths);
+
 protected:
     bool acceptNavigationRequest(const QUrl &url, NavigationType type, bool isMainFrame) override;
     QStringList chooseFiles(FileSelectionMode mode, const QStringList &oldFiles, const QStringList &acceptedMimeTypes) override;
@@ -28,8 +33,9 @@ class Window : public QWebEngineView
 public:
     Window(QWebEngineProfile *profile, SchemeHandler *scheme, ThemeWatcher *theme);
 
-    // Queue files to open; delivered once the page has loaded.
-    void openFiles(const QStringList &paths);
+    // Validate one selection and queue it, or return an error for the launcher.
+    QString openFiles(const QStringList &paths);
+    void queueFiles(QList<ImportFile> files);
 
 private:
     void pushTheme();
@@ -40,7 +46,7 @@ private:
 
     SchemeHandler *m_scheme;
     ThemeWatcher *m_theme;
-    QStringList m_pending;
+    QList<QList<ImportFile>> m_pending;
     bool m_ready = false;
     bool m_recovered = false;
     int m_selfTestGeneration = 0;

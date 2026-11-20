@@ -1,5 +1,7 @@
 #pragma once
 
+#include "shapefile_companions.h"
+
 #include <QHash>
 #include <QString>
 #include <QWebEngineUrlRequestInterceptor>
@@ -25,7 +27,8 @@ public:
 
     // Returns the URL the page can fetch the file from.
     // The URL works once: the first successful read revokes it.
-    QString shareFile(const QString &absolutePath);
+    QString shareFile(const ImportFile &file, const QString &batch);
+    QString releaseUrl(const QString &batch) const;
     // Forget every unread file URL (the page that was handed them is gone).
     void revokeAll();
     QString coreDir() const { return m_coreDir; }
@@ -33,8 +36,13 @@ public:
     void requestStarted(QWebEngineUrlRequestJob *job) override;
 
 private:
+    struct SharedFile {
+        ImportFile file;
+        QString batch;
+    };
+
     QString m_coreDir;
-    QHash<QString, QString> m_files;   // token -> absolute path
+    QHash<QString, SharedFile> m_files;   // token -> file and batch
 };
 
 // Mirrors the page CSP at the network layer: only the app scheme and the

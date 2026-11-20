@@ -75,8 +75,11 @@ test("the host's opened-file byte caps match the parser limits", () => {
   };
   assert.equal(mebi(scheme, "OpenedFileBytes"), mebi(limits, "fileBytes"));
   assert.equal(mebi(scheme, "OpenedZipBytes"), mebi(limits, "zipBytes"));
-  assert.match(scheme, /openRegularFile\(/);
-  assert.match(scheme, /file->size\(\) > openedFileLimit\(target\)/);
+  assert.match(scheme, /target->file\.open\(&opened\)/);
+  assert.match(scheme, /file->size\(\) > openedFileLimit\(target->file\.path\)/);
+  const importFile = read("host/shapefile_companions.cpp");
+  assert.match(importFile, /openRegularFile\(/);
+  assert.match(importFile, /openRegularFileAt\(/);
   assert.match(scheme, /\{"Content-Length", QByteArray::number\(file->size\(\)\)\}/);
   const opener = read("host/regular_file.cpp");
   assert.match(opener, /O_NONBLOCK/);

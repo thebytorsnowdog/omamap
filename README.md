@@ -2,7 +2,7 @@
 
 View spatial data on Omarchy. Drop in GeoJSON, KML, GPX, CSV or shapefiles, see them over street, topo or satellite maps, click any feature to read its attributes, browse each dataset as a table, and save the whole workspace as a profile.
 
-OmaMap follows your Omarchy colours and uses your configured UI font. The default light/dark basemap follows theme changes; choosing a basemap explicitly keeps that choice.
+OmaMap follows your Omarchy colours and uses your configured UI font. The basemap starts at **None**. Choose a basemap to load its tiles and remember that choice.
 
 ## Install
 
@@ -57,7 +57,7 @@ GeoJSON uses **longitude, latitude** order. For example, save this as `station.g
 
 ### Profiles
 
-**Save** (<kbd>Ctrl+S</kbd>) writes a `.omamap` profile: every open dataset with its data, style, visibility, stacking order and any warnings shown for it (such as an assumed coordinate system), plus the map view and basemap. Open it like any other file, from the app, the file manager or `omamap work.omamap`, to pick up where you left off. If datasets are already open, OmaMap asks before replacing them.
+**Save** (<kbd>Ctrl+S</kbd>) writes a `.omamap` profile with every open dataset, including its data, style, visibility, stacking order and warnings, plus the map view. Open it from the app, the file manager or `omamap work.omamap`. If datasets are already open, OmaMap asks before replacing them. The basemap is controlled by your local preference for every workspace. If you are upgrading from a release that could remember a basemap from a profile, choose your preferred basemap again.
 
 A profile contains a full copy of the data, so share it with the same care as the data itself. Profiles exported from WIMP (`.sdv-profile.json`) open too.
 
@@ -115,11 +115,11 @@ Fields from every feature are included, even when they first appear late in a da
 
 British National Grid data (EPSG:27700) is converted to WGS84 automatically, to within about 5 m (the same 7-parameter method PROJ uses without grid files). That covers easting/northing CSV, GeoJSON that declares EPSG:27700 (as older QGIS exports do), and shapefiles with a BNG `.prj`. CSV and GeoJSON conversions are noted in the dataset list.
 
-Open loose shapefile companions together with the same filename stem, or pass the `.shp` path to `omamap parcels.shp` (including from the Omarchy bar widget's recent list) so the desktop host discovers readable `.dbf`, `.prj` and `.cpg` siblings in the same directory automatically. Without `.prj`, coordinates are assumed to be WGS84 and a warning appears. A ZIP keeps the parts together when sharing the data. Arbitrary projected GeoJSON must be exported to WGS84 first; OmaMap is a viewer, not a geometry editor or general reprojection tool. Displayed lengths and areas use spherical approximations, and elevation is not included in length calculations.
+Open loose shapefile companions together with the same filename stem, or open the `.shp` through the desktop file picker, file manager or `omamap parcels.shp` to discover regular `.dbf`, `.prj` and `.cpg` siblings in the same directory. Select linked companions explicitly. If multiple siblings match the same component, select the intended component explicitly. Without `.prj`, coordinates are assumed to be WGS84 and a warning appears. A ZIP keeps the parts together when sharing the data. Arbitrary projected GeoJSON must be exported to WGS84 first; OmaMap is a viewer, not a geometry editor or general reprojection tool. Displayed lengths and areas use spherical approximations, and elevation is not included in length calculations.
 
 Imports are validated before anything reaches the map. Malformed geometry, unsafe property names, ZIP bombs, inconsistent archives and shapefile headers that don't fit their file are rejected with a reason. Most parsing runs in a background worker. KML and GPX need the page's XML parser, so conversion yields in short slices; initial XML parsing and final validation can still pause the window before Cancel takes effect.
 
-Limits: 100 MiB per file, 50 MiB per ZIP (250 MiB expanded, at most 50 layers and 1,000,000 features across them), 500,000 features, 5 million coordinates, 1,000 attribute names and 500 attributes per feature per dataset, 10 million values per CSV or shapefile table, and about 200 MiB of attribute data per dataset (attribute names count once per dataset, so a 200,000 × 20 CSV fits comfortably), 50 datasets.
+Limits: 100 files per import, including automatically discovered companions, 100 MiB per file, 50 MiB per ZIP (250 MiB expanded, at most 50 layers and 1,000,000 features across them), 500,000 features, 5 million coordinates, 1,000 attribute names and 500 attributes per feature per dataset, 10 million values per CSV or shapefile table, and about 200 MiB of attribute data per dataset (attribute names count once per dataset, so a 200,000 × 20 CSV fits comfortably), 50 datasets.
 
 The whole workspace is also limited to 1 million features, 10 million coordinates, and 512 MiB of estimated data and rendering structures. This estimate is an admission budget, not a limit on the process's actual memory use. The table's search-text cache is limited to 16 MiB per dataset.
 
