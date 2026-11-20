@@ -19,6 +19,10 @@ extern "C" {
 // On success, out->size is the size of that inode at open time.
 bool openRegularFile(const char *path, struct RegularFile *out);
 
+// Open one entry beneath an already-open directory. Only explicit selections
+// may set followLinks.
+bool openRegularFileAt(int directoryFd, const char *name, bool followLinks, struct RegularFile *out);
+
 #ifdef __cplusplus
 }
 #endif

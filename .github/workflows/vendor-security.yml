@@ -1,11 +1,6 @@
 name: Vendored dependency security
 on:
-  pull_request:
-    paths:
-      - core/vendor/**
-      - packaging/vendor-dependencies.json
-      - scripts/check-vendor-advisories.py
-      - .github/workflows/vendor-security.yml
+  workflow_call:
   schedule:
     - cron: '23 8 * * 1'
   workflow_dispatch:
@@ -19,6 +14,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+      - name: Check for vendored dependency changes
+        if: github.event_name == 'pull_request'
+        id: paths
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          git diff --quiet --no-renames "$BASE...$HEAD" -- core/vendor/ \
+            packaging/vendor-dependencies.json scripts/check-vendor-advisories.py \
+            .github/workflows/vendor-security.yml .github/workflows/ci.yml
+          status=$?
+          set -e
+          case "$status" in
+            0) echo "audit=false" >> "$GITHUB_OUTPUT" ;;
+            1) echo "audit=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$status" ;;
+          esac
       - run: python3 scripts/check-vendor-advisories.py
+        if: github.event_name != 'pull_request' || steps.paths.outputs.audit == 'true'
         env:
           GH_TOKEN: ${{ github.token }}

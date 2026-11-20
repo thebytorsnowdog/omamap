@@ -5,7 +5,7 @@
 # (pinned to a tag or commit) and give it a checksum.
 pkgname=omamap
 pkgver=0.4.0
-pkgrel=1
+pkgrel=2
 pkgdesc="View GeoJSON, KML, GPX, CSV and shapefiles over street and satellite maps"
 arch=(x86_64 aarch64)
 url="https://github.com/thebytorsnowdog/omamap"

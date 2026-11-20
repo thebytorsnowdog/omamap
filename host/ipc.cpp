@@ -1,51 +1,47 @@
 #include "ipc.h"
 
 #include <QDir>
-#include <QIODevice>
 #include <QUrl>
 
-IpcTake takeIpcLines(QIODevice *device, int received, qint64 consumed)
+bool makeIpcMessage(const QStringList &paths, QByteArray &message)
 {
+    message.clear();
+    for (const QString &path : paths) {
+        const QByteArray encoded = QUrl::fromLocalFile(path).toEncoded();
+        if (encoded.size() > IpcMaxPendingBytes - message.size() - 2) {
+            message.clear();
+            return false;
+        }
+        message += encoded;
+        message += '\n';
+    }
+    message += '\0';
+    return true;
+}
+
+IpcTake takeIpcMessage(QByteArray &pending, const QByteArray &incoming)
+{
+    if (incoming.size() > IpcMaxPendingBytes - pending.size())
+        return {{}, QStringLiteral("The launch request exceeds 1 MiB."), true};
+    pending += incoming;
+    const qsizetype end = incoming.indexOf('\0');
+    if (end == -1) return {};
+    if (end != incoming.size() - 1)
+        return {{}, QStringLiteral("Invalid launch request."), true};
+
     IpcTake out;
-    out.received = received;
-    out.consumed = consumed;
-    if (!device) {
-        out.abort = true;
-        return out;
+    out.complete = true;
+    const QByteArrayView frame(pending.constData(), pending.size() - 1);
+    for (qsizetype start = 0; start < frame.size();) {
+        const qsizetype newline = frame.indexOf('\n', start);
+        if (newline < 0) return {{}, QStringLiteral("Incomplete file path in launch request."), true};
+        const QByteArray line = frame.sliced(start, newline - start).toByteArray();
+        const QUrl url = QUrl::fromEncoded(line, QUrl::StrictMode);
+        const QString path = url.toLocalFile();
+        if (!url.isLocalFile() || !QDir::isAbsolutePath(path) || path.contains(QChar(u'\0')))
+            return {{}, QStringLiteral("Invalid file path in launch request."), true};
+        out.paths << path;
+        start = newline + 1;
     }
-    while (device->canReadLine()) {
-        if (out.consumed >= IpcMaxPendingBytes || out.consumed < 0) {
-            out.abort = true;
-            return out;
-        }
-        // canReadLine() means a newline is already buffered. Peeking the cap
-        // finds that newline when the line fits, and refuses the line when it
-        // does not, without copying the rest of it.
-        const QByteArray head = device->peek(IpcMaxPendingBytes + 1);
-        const int newline = head.indexOf('\n');
-        if (newline < 0 || newline >= IpcMaxPendingBytes) {
-            out.abort = true;
-            return out;
-        }
-        const QByteArray line = device->read(newline + 1);
-        if (line.size() != newline + 1) {
-            out.abort = true;
-            return out;
-        }
-        out.consumed += line.size();
-        // Stop once this connection has handed over a megabyte of text, even
-        // when that last line is the end of what has arrived so far.
-        if (out.consumed > IpcMaxPendingBytes) {
-            out.abort = true;
-            return out;
-        }
-        const QByteArray trimmed = line.trimmed();
-        if (trimmed.isEmpty() || out.received >= IpcMaxPaths) continue;
-        const QUrl url = QUrl::fromEncoded(trimmed, QUrl::StrictMode);
-        if (!url.isLocalFile() || !QDir::isAbsolutePath(url.toLocalFile())) continue;
-        out.paths << url.toLocalFile();
-        out.received++;
-    }
-    if (device->bytesAvailable() > IpcMaxPendingBytes) out.abort = true;
     return out;
 }

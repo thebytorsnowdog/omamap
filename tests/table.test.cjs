@@ -8,7 +8,7 @@ const vm = require("node:vm");
 function table(properties, overrides = {}) {
   const elements = new Map();
   const context = vm.createContext({
-    performance: { now: () => 0 }, setTimeout,
+    performance: { now: () => 0 }, setTimeout, clearTimeout,
     requestAnimationFrame: () => 1, cancelAnimationFrame() {},
     TextEncoder, Blob,
     el(id) {
@@ -190,4 +190,40 @@ test("table CSV and GeoJSON exports preserve filter order, escape formulas witho
   await t.refilter();
   assert.equal(elements.get("tp-export-csv").disabled, true);
   assert.equal(elements.get("tp-export-geojson").disabled, true);
+});
+
+test("an immediate table export flushes the pending narrowing search", async () => {
+  const handlers = new Map();
+  const timers = new Map();
+  const downloads = [];
+  let nextTimer = 0;
+  let anchor;
+  const { table: t, context } = table([{ name: "Keep this row" }, { name: "Omit this row" }], {
+    STATE: { map: { on() {} }, host: true },
+    storageGet: () => null,
+    setTimeout: (fn) => { timers.set(++nextTimer, fn); return nextTimer; },
+    clearTimeout: (timer) => timers.delete(timer),
+    ResizeObserver: class { observe() {} },
+    URL: { createObjectURL: (blob) => { downloads.push(blob); return "blob:fixture"; } },
+    document: {
+      createElement: () => ({ click() { assert.equal(this, anchor); }, remove() {} }),
+      body: { appendChild: (el) => { anchor = el; } }
+    }
+  });
+  const el = context.el;
+  context.el = (id) => {
+    const node = el(id);
+    node.addEventListener = (event, handler) => handlers.set(id + ":" + event, handler);
+    return node;
+  };
+
+  t.wire();
+  await t.refilter();
+  assert.deepEqual(Array.from(t.order), [0, 1]);
+  handlers.get("tp-search:input")({ target: { value: "Keep this" } });
+  assert.equal(timers.size, 1, "the filter is still debounced when export is clicked");
+  await handlers.get("tp-export-csv:click")();
+  assert.equal(downloads.length, 1);
+  assert.match(await downloads[0].text(), /Keep this row/);
+  assert.doesNotMatch(await downloads[0].text(), /Omit this row/);
 });

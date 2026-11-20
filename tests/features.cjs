@@ -250,6 +250,9 @@ function fixtures(dir) {
     await page.keyboard.press("ArrowDown");
     const after = await page.evaluate(() => currentHit().layer._omaIndex);
     assert.notEqual(after, before);
+    // Table selection is painted on the next animation frame.
+    await page.waitForFunction((expected) =>
+      document.querySelector(".tp-row.selected .tp-num")?.textContent === String(expected + 1), after);
     assert.equal(await page.locator(".tp-row.selected .tp-num").textContent(), String(after + 1));
   });
 
@@ -289,7 +292,7 @@ function fixtures(dir) {
     assert.equal(await page.locator("#table-panel").isHidden(), true);
   });
 
-  await check("a saved profile reopens with data, styles, visibility, warnings, view and basemap", async () => {
+  await check("a saved profile restores data, styles, visibility, warnings and view", async () => {
     await page.evaluate(() => clearAll());
     await page.setInputFiles("#file-input", [path.join(OUT, "fixtures-features", "assets.geojson"), path.join(OUT, "fixtures-features", "sites.geojson")]);
     await page.waitForFunction(() => STATE.datasets.length === 2 && document.getElementById("loading").hidden);
@@ -331,7 +334,7 @@ function fixtures(dir) {
     assert.deepEqual(after.warnings, ["No .prj file: coordinates were assumed to be WGS84."]);
     assert.deepEqual(after.warnRows, ["⚠ No .prj file: coordinates were assumed to be WGS84."]);
     assert.deepEqual(after.view, [55.95, -3.9, 12]);
-    assert.equal(after.basemap, "topo");
+    assert.equal(after.basemap, "streets");
   });
 
   await check("opening a profile over open datasets asks first", async () => {

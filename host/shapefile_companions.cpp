@@ -8,119 +8,118 @@
 #include <QHash>
 #include <QSet>
 #include <algorithm>
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace {
 
 constexpr qint64 MaxCompanionBytes = qint64(100) * 1024 * 1024;
 
-bool isReadableRegular(const QString &path)
+bool isCompanion(const QString &ext)
+{
+    return ext == QLatin1String("dbf") || ext == QLatin1String("prj") || ext == QLatin1String("cpg");
+}
+
+struct ShapeSet {
+    int id = -1;
+    bool hasShp = false;
+    QSet<QString> explicitParts;
+};
+
+struct ShapeDirectory {
+    std::shared_ptr<DIR> handle;
+    QHash<QString, ShapeSet> sets;
+};
+
+std::shared_ptr<DIR> openDirectory(const QString &path)
+{
+    const int fd = ::open(QFile::encodeName(path).constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return {};
+    DIR *directory = ::fdopendir(fd);
+    if (directory) return {directory, ::closedir};
+    ::close(fd);
+    return {};
+}
+
+bool inspect(ImportFile &entry)
 {
     RegularFile opened{};
-    const QByteArray native = QFile::encodeName(path);
-    if (!openRegularFile(native.constData(), &opened)) return false;
+    if (!entry.open(&opened)) return false;
     ::close(opened.fd);
-    return opened.size >= 0 && opened.size <= MaxCompanionBytes;
+    entry.size = opened.size;
+    return true;
 }
 
-bool isShapePartSuffix(const QString &ext)
+ImportBatch tooManyFiles()
 {
-    return ext == QLatin1String("shp") || ext == QLatin1String("dbf")
-        || ext == QLatin1String("prj") || ext == QLatin1String("cpg");
-}
-
-QString partKey(const QString &dirPath, const QString &stemLower, const QString &extLower)
-{
-    return dirPath + QLatin1Char('\n') + stemLower + QLatin1Char('\n') + extLower;
+    return {{}, QStringLiteral("Open at most %1 files at once, including shapefile companions. Select fewer shapefiles or files per launch.")
+                    .arg(MaxImportFiles)};
 }
 
 } // namespace
 
-QStringList expandShapefileCompanions(const QStringList &paths)
+bool ImportFile::open(RegularFile *file) const
 {
-    static const QStringList companionExts{
-        QStringLiteral("dbf"),
-        QStringLiteral("prj"),
-        QStringLiteral("cpg"),
-    };
+    if (!directory) return openRegularFile(QFile::encodeName(path).constData(), file);
+    const QByteArray name = QFile::encodeName(QFileInfo(path).fileName());
+    return openRegularFileAt(::dirfd(directory.get()), name.constData(), !implicit, file);
+}
 
+ImportBatch expandShapefileCompanions(const QStringList &paths)
+{
     QSet<QString> seenPaths;
-    QSet<QString> seenParts;
-    QStringList uniqueInputs;
-    uniqueInputs.reserve(paths.size());
-
+    QHash<QString, ShapeDirectory> directories;
+    int nextGroup = 0;
+    ImportBatch batch;
     for (const QString &raw : paths) {
         if (raw.isEmpty()) continue;
         const QFileInfo info(raw);
-        const QString absPath = info.absoluteFilePath();
-        if (seenPaths.contains(absPath)) continue;
-        seenPaths.insert(absPath);
-        uniqueInputs << absPath;
+        const QString path = info.absoluteFilePath();
+        if (seenPaths.contains(path)) continue;
+        seenPaths.insert(path);
 
-        const QString extLower = info.suffix().toLower();
-        if (isShapePartSuffix(extLower) && isReadableRegular(absPath)) {
-            seenParts.insert(partKey(info.absolutePath(), info.completeBaseName().toLower(), extLower));
+        const QString ext = info.suffix().toLower();
+        ImportFile file{path};
+        if (ext == QLatin1String("shp") || isCompanion(ext)) {
+            const QString parent = info.absolutePath();
+            auto dir = directories.find(parent);
+            file.directory = dir == directories.end() ? openDirectory(parent) : dir->handle;
+            if (!inspect(file)) continue;
+            if (dir == directories.end()) dir = directories.insert(parent, {file.directory, {}});
+            ShapeSet &set = dir->sets[info.completeBaseName().toLower()];
+            if (set.id < 0) set.id = nextGroup++;
+            file.shapeGroup = set.id;
+            if (ext == QLatin1String("shp")) set.hasShp |= file.size <= MaxCompanionBytes;
+            else set.explicitParts.insert(ext);
+        } else if (!inspect(file)) continue;
+        batch.files.append(file);
+        if (batch.files.size() > MaxImportFiles) return tooManyFiles();
+    }
+
+    for (auto dir = directories.cbegin(); dir != directories.cend(); ++dir) {
+        const auto &sets = dir->sets;
+        const auto &directory = dir->handle;
+        if (!directory || std::none_of(sets.cbegin(), sets.cend(), [](const ShapeSet &set) { return set.hasShp; })) continue;
+        const QDir parent(dir.key());
+        while (const auto *entry = ::readdir(directory.get())) {
+            const QString name = QFile::decodeName(entry->d_name);
+            if (QFile::encodeName(name) != entry->d_name) continue;
+            const QFileInfo info(name);
+            const QString ext = info.suffix().toLower();
+            if (!isCompanion(ext)) continue;
+            const auto set = sets.constFind(info.completeBaseName().toLower());
+            if (set == sets.cend() || !set->hasShp || set->explicitParts.contains(ext)) continue;
+
+            // Use the pinned directory for both discovery and the eventual read.
+            // Keep all matching regular entries so the renderer can reject duplicates.
+            ImportFile file{parent.filePath(name), 0, set->id, directory, true};
+            if (!inspect(file) || file.size > MaxCompanionBytes) continue;
+            batch.files.append(file);
+            if (batch.files.size() > MaxImportFiles) return tooManyFiles();
         }
     }
 
-    QHash<QString, QStringList> dirCache;
-    QStringList expanded;
-    expanded.reserve(uniqueInputs.size());
-
-    for (const QString &absPath : std::as_const(uniqueInputs)) {
-        expanded << absPath;
-        const QFileInfo shpInfo(absPath);
-        const QString shpSuffix = shpInfo.suffix();
-        if (shpSuffix.compare(QLatin1String("shp"), Qt::CaseInsensitive) != 0) continue;
-
-        const QString dirPath = shpInfo.absolutePath();
-        const QString stem = shpInfo.completeBaseName();
-        const QString stemLower = stem.toLower();
-        if (!seenParts.contains(partKey(dirPath, stemLower, QStringLiteral("shp")))) continue;
-
-        auto it = dirCache.find(dirPath);
-        if (it == dirCache.end()) {
-            it = dirCache.insert(dirPath,
-                QDir(dirPath).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot, QDir::Name));
-        }
-        const QStringList &entries = it.value();
-        const bool preferUpper = (shpSuffix == shpSuffix.toUpper());
-
-        for (const QString &comp : companionExts) {
-            const QString key = partKey(dirPath, stemLower, comp);
-            if (seenParts.contains(key)) continue;
-
-            const QString preferredSuffix = preferUpper ? comp.toUpper() : comp;
-            QStringList candidates;
-            for (const QString &entry : entries) {
-                const QFileInfo entryInfo(entry);
-                if (entryInfo.suffix().compare(comp, Qt::CaseInsensitive) == 0
-                    && entryInfo.completeBaseName().compare(stem, Qt::CaseInsensitive) == 0) {
-                    candidates << entry;
-                }
-            }
-            std::sort(candidates.begin(), candidates.end(), [&](const QString &a, const QString &b) {
-                const QFileInfo ia(a), ib(b);
-                const auto rank = [&](const QFileInfo &fi) {
-                    if (fi.completeBaseName() == stem && fi.suffix() == preferredSuffix) return 0;
-                    if (fi.completeBaseName() == stem) return 1;
-                    return 2;
-                };
-                const int ra = rank(ia), rb = rank(ib);
-                return ra != rb ? ra < rb : a < b;
-            });
-
-            const QDir dir(dirPath);
-            for (const QString &name : std::as_const(candidates)) {
-                const QString candidatePath = QFileInfo(dir.filePath(name)).absoluteFilePath();
-                if (seenPaths.contains(candidatePath) || !isReadableRegular(candidatePath)) continue;
-                seenPaths.insert(candidatePath);
-                seenParts.insert(key);
-                expanded << candidatePath;
-                break;
-            }
-        }
-    }
-
-    return expanded;
+    if (batch.files.isEmpty() && !paths.isEmpty())
+        batch.error = QStringLiteral("None of the selected files could be opened.");
+    return batch;
 }

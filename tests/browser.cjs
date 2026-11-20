@@ -77,8 +77,8 @@ function writeFixtures(dir) {
   await page.goto(origin + "/index.html");
   await page.waitForFunction(() => window.OmaMap && document.querySelectorAll("#basemaps button").length === 6);
 
-  await check("loads with no errors and the dark basemap by default", async () => {
-    assert.equal(await page.evaluate(() => STATE.basemapId), "dark");
+  await check("loads with no errors and no basemap by default", async () => {
+    assert.equal(await page.evaluate(() => STATE.basemapId), "none");
     assert.deepEqual(errors, []);
   });
 
@@ -205,14 +205,13 @@ function writeFixtures(dir) {
     for (const host of external) assert.match(host, allowed);
   });
 
-  await check("light Omarchy theme recolours UI and auto basemap", async () => {
-    await page.evaluate(() => { localStorage.removeItem("omamap.basemap"); STATE.basemapPref = "auto"; });
+  await check("light Omarchy theme recolours the UI and keeps the selected basemap", async () => {
     await page.evaluate(() => OmaMap.applyTheme({ mode: "light", font: "JetBrainsMono Nerd Font", colors: {
       background: "#eff1f5", dark_background: "#e6e9ef", darker_background: "#dce0e8", lighter_background: "#ccd0da",
       foreground: "#4c4f69", dark_foreground: "#5c5f77", muted: "#8c8fa1", accent: "#1e66f5", selection: "#bcc0cc",
       red: "#d20f39", green: "#40a02b", yellow: "#df8e1d", blue: "#1e66f5", magenta: "#8839ef", cyan: "#179299", orange: "#fe640b", brown: "#dc8a78" } }));
     assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgb(239, 241, 245)");
-    assert.equal(await page.evaluate(() => STATE.basemapId), "light");
+    assert.equal(await page.evaluate(() => STATE.basemapId), "streets");
     assert.equal(await page.evaluate(() => STATE.palette.includes("#1e66f5")), false, "accent is reserved for selection");
     await setView(55.9475, -3.17, 13);
     await clickAt(55.9475, -3.165);

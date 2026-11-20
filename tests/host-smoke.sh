@@ -133,7 +133,7 @@ mkdir -p "$themes/current/theme"
 printf 'mode = "dark"\nbackground = "#101010"\naccent = "#ff8800"\n' > "$themes/current/theme/colors.toml"
 log=$(mktemp "$scratch/page.XXXXXX")
 readylog=$(mktemp "$scratch/ready.XXXXXX.stderr")
-OMAMAP_THEME_DIR="$themes/current/theme" OMAMAP_SELFTEST=1 OMAMAP_SELFTEST_WAIT='STATE.mode === "light" && STATE.basemapId === "light"' timeout -k 5 60 "$bin" --new-window > "$log" 2> "$readylog" &
+OMAMAP_THEME_DIR="$themes/current/theme" OMAMAP_SELFTEST=1 OMAMAP_SELFTEST_WAIT='STATE.mode === "light" && STATE.basemapId === "none"' timeout -k 5 60 "$bin" --new-window > "$log" 2> "$readylog" &
 first=$!
 wait_ready "$readylog"
 rm -rf "$themes/current/theme" && mkdir -p "$themes/current/theme"
@@ -141,7 +141,7 @@ printf 'mode = "light"\nbackground = "#fafafa"\naccent = "#0055ff"\n' > "$themes
 wait "$first"
 cat "$readylog" >> "$hostlog"
 out=$(tail -1 "$log"); rm -rf "$log" "$themes"
-if [[ $out == *'"mode":"light"'* && $out == *'rgb(250, 250, 250)'* && $out == *'"basemap":"light"'* ]]; then
+if [[ $out == *'"mode":"light"'* && $out == *'rgb(250, 250, 250)'* && $out == *'"basemap":"none"'* ]]; then
   echo "✔ switching the Omarchy theme recolours the open window"
 else
   echo "✖ switching the Omarchy theme recolours the open window: $out"; fail=1
