@@ -250,6 +250,9 @@ function fixtures(dir) {
     await page.keyboard.press("ArrowDown");
     const after = await page.evaluate(() => currentHit().layer._omaIndex);
     assert.notEqual(after, before);
+    // Table selection is painted on the next animation frame.
+    await page.waitForFunction((expected) =>
+      document.querySelector(".tp-row.selected .tp-num")?.textContent === String(expected + 1), after);
     assert.equal(await page.locator(".tp-row.selected .tp-num").textContent(), String(after + 1));
   });
 
