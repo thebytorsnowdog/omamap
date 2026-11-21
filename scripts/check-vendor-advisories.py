@@ -19,9 +19,10 @@ inventory = json.loads((ROOT / "packaging/vendor-dependencies.json").read_text()
 
 def fetch(url):
     headers = {"User-Agent": "OmaMap-vendor-audit", "Accept": "application/json"}
+    request = urllib.request.Request(url, headers=headers)
     if url.startswith("https://api.github.com/") and os.environ.get("GH_TOKEN"):
-        headers["Authorization"] = "Bearer " + os.environ["GH_TOKEN"]
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+        request.add_unredirected_header("Authorization", "Bearer " + os.environ["GH_TOKEN"])
+    with urllib.request.urlopen(request, timeout=30) as response:
         data = response.read(20 * 1024 * 1024 + 1)
         if len(data) > 20 * 1024 * 1024:
             raise ValueError("Upstream response exceeded the download limit")
