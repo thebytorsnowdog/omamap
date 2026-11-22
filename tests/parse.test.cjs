@@ -701,24 +701,26 @@ test("attribute data beyond the budget is refused with a clear reason", () => {
   assert.throws(() => P.validateFeatureCollection({ type: "FeatureCollection", features }), /200 MiB attribute budget after [\d,]+ features\. Remove unused columns/);
 });
 
-test("KML and GPX inside a ZIP or KMZ come back for the page to convert", async () => {
+test("KML and GPX inside a ZIP or KMZ are converted before returning datasets", async () => {
   const kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><Point><coordinates>-1,51</coordinates></Point></Placemark></kml>';
   const gpx = '<?xml version="1.0"?><gpx version="1.1" creator="t"><wpt lat="51" lon="-1"/></gpx>';
   const pt = JSON.stringify({ type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: {} });
   const zip = fflate.zipSync({ "doc.kml": fflate.strToU8(kml), "walk.gpx": fflate.strToU8(gpx), "p.geojson": fflate.strToU8(pt) });
   const layers = await P.parseBytes("mixed.zip", zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength));
   assert.deepEqual(layers.map((l) => l.name).sort(), ["mixed / doc", "mixed / p", "mixed / walk"]);
-  const xml = layers.filter((l) => l.xml).map((l) => l.xml.ext).sort();
-  assert.deepEqual(xml, ["gpx", "kml"]);
+  for (const name of ["mixed / doc", "mixed / walk"]) {
+    const layer = layers.find((l) => l.name === name);
+    assert.deepEqual(layer.geojson.features[0].geometry.coordinates, [-1, 51]);
+    assert.equal(layer.xml, undefined);
+  }
   const kmz = fflate.zipSync({ "doc.kml": fflate.strToU8(kml) });
   const only = await P.parseBytes("trip.kmz", kmz.buffer.slice(kmz.byteOffset, kmz.byteOffset + kmz.byteLength));
-  assert.equal(only.length, 1); assert.equal(only[0].name, "trip"); assert.equal(only[0].xml.items, 1);
+  assert.equal(only.length, 1); assert.equal(only[0].name, "trip"); assert.equal(only[0].geojson.features.length, 1);
   const bad = fflate.zipSync({ "doc.kml": fflate.strToU8('<!DOCTYPE x [<!ENTITY a "b">]>' + kml) });
   await assert.rejects(P.parseBytes("bad.kmz", bad.buffer.slice(bad.byteOffset, bad.byteOffset + bad.byteLength)), /DOCTYPE/);
-  // Converted on the page; totals are re-checked with exact counts.
-  const two = [{ xml: { text: "", ext: "kml" } }, { xml: { text: "", ext: "kml" } }];
+  // The final total must be checked even if preflight underestimated it.
   const run = () => ({ type: "FeatureCollection", features: new Array(600000).fill(0) });
-  await assert.rejects(P.resolveXmlLayers(two, run), /together exceed/);
+  await assert.rejects(P.parseBytes("mixed.zip", ab(zip), run), /together exceed/);
 });
 
 function drainXml(xml, ext) {
@@ -806,26 +808,63 @@ test("a KML or GPX over the feature cap is refused before it is scanned", () => 
     /waypoints, tracks and routes/);
 });
 
+const TRACK_POINTS = 400000, PLACEMARKS = 4000;
+const largeGpx = () => '<?xml version="1.0"?><gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>' +
+  '<trkpt lat="55.1" lon="-3.1"/>'.repeat(TRACK_POINTS) + "</trkseg></trk></gpx>";
+const largeKml = () => '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>' +
+  '<Placemark><name>P</name><Point><coordinates>-3.1,55.9</coordinates></Point></Placemark>'.repeat(PLACEMARKS) +
+  "</Document></kml>";
+
 test("large KML and GPX stay inside a slice bound", () => {
-  // One track used to occupy the UI for the whole DOMParser call (about 1.6 s
-  // for 400,000 points). The scan has to yield well inside that.
-  const points = 400000;
-  const gpx = '<?xml version="1.0"?><gpx><trk><trkseg>' + '<trkpt lat="55.1" lon="-3.1"/>'.repeat(points) + "</trkseg></trk></gpx>";
+  const gpx = largeGpx();
   const track = drainXml(gpx, "gpx");
   assert.equal(track.value.features.length, 1);
-  assert.equal(track.value.coordinateCount, points);
+  assert.equal(track.value.coordinateCount, TRACK_POINTS);
   assert.ok(track.yields >= 20, "yields " + track.yields);
   assert.ok(track.max < 900, "longest GPX slice " + track.max.toFixed(1) + " ms");
   assert.ok(track.ms < 10000, "GPX took " + track.ms.toFixed(0) + " ms");
 
-  const marks = 4000;
-  const kml = '<?xml version="1.0"?><kml><Document>' +
-    '<Placemark><name>P</name><Point><coordinates>-3.1,55.9</coordinates></Point></Placemark>'.repeat(marks) +
-    "</Document></kml>";
-  const places = drainXml(kml, "kml");
-  assert.equal(places.value.features.length, marks);
+  const places = drainXml(largeKml(), "kml");
+  assert.equal(places.value.features.length, PLACEMARKS);
   assert.ok(places.yields >= 8, "yields " + places.yields);
   assert.ok(places.max < 900, "longest KML slice " + places.max.toFixed(1) + " ms");
+});
+
+test("worker converts large XML and rejects DOCTYPE and ENTITY declarations", async () => {
+  const context = vm.createContext({ OmaParse: P, importScripts() {}, self: {} });
+  vm.runInContext(fs.readFileSync(path.join(core, "parse-worker.js"), "utf8"), context);
+  let reply;
+  context.self.postMessage = (message) => { reply = message; };
+  const run = async (name, buffer) => {
+    reply = null;
+    await context.self.onmessage({ data: { id: 1, kind: "file", name, buffer } });
+    return reply;
+  };
+  for (const [name, buffer] of [
+    ["bad.kml", bytes('<!DOCTYPE kml SYSTEM "unused.dtd"><kml/>')],
+    ["bad.gpx", bytes('<!ENTITY x "value"><gpx/>')],
+    ["bad.kmz", ab(fflate.zipSync({ "doc.kml": fflate.strToU8('<!DOCTYPE kml [<!ENTITY x "value">]><kml/>') }))]
+  ]) {
+    const result = await run(name, buffer);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /DOCTYPE or ENTITY/);
+  }
+  const kml = await run("large.kml", bytes(largeKml()));
+  assert.equal(kml.ok, true, kml.error);
+  assert.equal(kml.datasets[0].geojson.features.length, PLACEMARKS);
+  const gpx = await run("large.gpx", bytes(largeGpx()));
+  assert.equal(gpx.ok, true, gpx.error);
+  assert.equal(gpx.datasets[0].geojson.coordinateCount, TRACK_POINTS);
+  const kmz = await run("trip.kmz", ab(fflate.zipSync({ "doc.kml": fflate.strToU8(largeKml()) }, { level: 0 })));
+  assert.equal(kmz.ok, true, kmz.error);
+  assert.equal(kmz.datasets[0].geojson.features.length, PLACEMARKS);
+});
+
+test("XML conversion stops when its time budget is exhausted", async () => {
+  let elapsed = 0;
+  const context = vm.createContext({ TextDecoder, performance: { now: () => elapsed++ * P.LIMITS.xmlMilliseconds } });
+  vm.runInContext(fs.readFileSync(path.join(core, "parse.js"), "utf8"), context);
+  await assert.rejects(context.OmaParse.parseBytes("slow.kml", bytes("<kml/>")), /XML conversion exceeded the 60 second time limit/);
 });
 
 test("parse worker dispatches jobs, reports rejected inputs and remains usable", async () => {

@@ -1,6 +1,6 @@
 "use strict";
-/* Parsing off the UI thread. Receives file bytes, returns validated
-   FeatureCollections. The page converts KML and GPX itself, in slices. */
+/* Parsing off the UI thread. Receives file bytes and returns validated
+   datasets or a profile. */
 importScripts("vendor/fflate.js", "vendor/shp.js", "vendor/papaparse.min.js", "parse.js");
 
 self.onmessage = async function (event) {

@@ -476,28 +476,37 @@ function fixtures(dir) {
     assert.equal(r.errors, 0);
   });
 
-  await check("a large KML converts in slices and Cancel closes the conversion iterator", async () => {
+  await check("without a worker, large KML converts in slices and Cancel closes the iterator", async () => {
     await page.evaluate(() => { clearAll(); document.querySelectorAll(".toast").forEach((t) => t.remove()); });
     const r = await page.evaluate(async () => {
       let kml = '<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>';
       for (let i = 0; i < 40000; i++) kml += "<Placemark><name>P" + i + "</name><Point><coordinates>" + (-4 + (i % 200) * 0.01) + "," + (55 + Math.floor(i / 200) * 0.005) + "</coordinates></Point></Placemark>";
       kml += "</Document></kml>";
-      const convert = OmaParse.xmlToGeoJSONSteps;
+      const WorkerClass = window.Worker, run = runSliced;
+      Parser.worker.terminate();
+      Parser.worker = null;
+      window.Worker = class { constructor() { throw new Error("Workers unavailable"); } };
       let slices = 0, closed = false;
-      OmaParse.xmlToGeoJSONSteps = function* (...args) {
-        const job = convert(...args);
-        try {
-          let step;
-          while (!(step = job.next()).done) {
-            // Cancel at a real conversion boundary, after parsing has begun.
-            if (++slices === 3) document.getElementById("loading-cancel").click();
-            yield step.value;
-          }
-          return step.value;
-        } finally { job.return(); closed = true; }
+      runSliced = function (job) {
+        return run((function* () {
+          try {
+            let step;
+            while (!(step = job.next()).done) {
+              // Cancel at a real conversion boundary, after parsing has begun.
+              if (++slices === 3) document.getElementById("loading-cancel").click();
+              yield step.value;
+            }
+            return step.value;
+          } finally { job.return(); closed = true; }
+        })());
       };
       try { await handleFiles([new File([kml], "big.kml")]); }
-      finally { OmaParse.xmlToGeoJSONSteps = convert; }
+      finally {
+        runSliced = run;
+        window.Worker = WorkerClass;
+        Parser.failed = false;
+        Parser.start();
+      }
       return { slices, closed, datasets: STATE.datasets.length, warn: Array.from(document.querySelectorAll(".toast.warn")).map((t) => t.textContent).join(" ") };
     });
     assert.equal(r.datasets, 0);
