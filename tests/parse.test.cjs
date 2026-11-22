@@ -162,6 +162,34 @@ test("British National Grid converts to WGS84 within 1 m of PROJ", () => {
   }
 });
 
+test("British National Grid conversions match the pre-cap results exactly", () => {
+  const cases = [
+    [325165, 673490, [-3.1998812, 55.9485944]], // Edinburgh Castle
+    [259010, 665560, [-4.2543528, 55.862538]], // Glasgow George Square
+    [134250, 25250, [-5.7150377, 50.0678449]], // Land's End
+    [447700, 1141500, [-1.1426065, 60.1552037]], // Lerwick
+    [623000, 308500, [1.2936134, 52.6284194]], // Norwich
+    [0, 0, [-7.5571598, 49.7668072]],
+    [700000, 0, [2.1700786, 49.8251846]],
+    [0, 1300000, [-9.4971381, 61.3742501]],
+    [700000, 1300000, [3.6320205, 61.4645902]]
+  ];
+  for (const [easting, northing, expected] of cases) {
+    assert.deepEqual(P.bngToWgs84(easting, northing), expected, `${easting}, ${northing}`);
+  }
+});
+
+test("British National Grid rejects non-finite and out-of-range coordinates", () => {
+  for (const value of [NaN, Infinity, -Infinity, Number.MAX_VALUE, -Number.MAX_VALUE, -1]) {
+    for (const [easting, northing] of [[value, 673490], [325165, value]]) {
+      assert.throws(() => P.bngToWgs84(easting, northing), {
+        name: "RangeError",
+        message: "A coordinate is outside the British National Grid area."
+      });
+    }
+  }
+});
+
 test("easting/northing CSV is converted, with a note", async () => {
   const [ds] = await P.parseBytes("bng.csv", bytes("Asset,Easting,Northing\nCastle,325165,673490\nSquare,259010,665560\n"));
   assert.ok(metres(ds.geojson.features[0].geometry.coordinates, [-3.1998812, 55.9485944]) < 1);

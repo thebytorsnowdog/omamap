@@ -21,16 +21,19 @@ First-party display code puts file values in text nodes or attributes. The fixed
 
 ## Left alone
 
-I did not restyle the interface, rename modules, or change vendored files. The vendored hashes match published releases, and the advisory check found nothing to upgrade. I did not add an iteration cap to `bngToWgs84`: a grid of 411 in-range easting and northing values, including the corners, all returned, and I have no input that fails to converge. I did not change `crossOrigin: true` on tile layers. That flag makes the image request send an `Origin` header. I could not run the Qt window here, so I did not check whether the tiles still load without it. The request filter already clears `Referer` and sets the User-Agent. I did not confirm whether Chromium still adds `Sec-CH-UA` client hints after that interceptor.
+I did not restyle the interface, rename modules, or change vendored files. The vendored hashes match published releases, and the advisory check found nothing to upgrade. I did not change `crossOrigin: true` on tile layers. That flag makes the image request send an `Origin` header. I could not run the Qt window here, so I did not check whether the tiles still load without it. The request filter already clears `Referer` and sets the User-Agent. I did not confirm whether Chromium still adds `Sec-CH-UA` client hints after that interceptor.
 
 Numeric range classification still sorts its values in one step inside `buildRanges` in `core/style.js`. The table sort already yields. KML and GPX still call `DOMParser.parseFromString` in one step. Replacing that is a new parser, not a small patch. The 512 MiB workspace figure is still an estimate, not a process limit. Lowering it would change which files open.
+
+## Follow-up fix
+
+`bngToWgs84` rejects non-finite or out-of-range British National Grid coordinates and throws if either latitude calculation fails to converge within 16 iterations. Regression tests pin the original WGS84 results for five reference points and all four grid corners.
 
 ## Remaining risks
 
 - KML and GPX can still pause the window inside `DOMParser.parseFromString`. Counting placemarks and rejecting `DOCTYPE` and `ENTITY` run first. They do not cap the time or the DOM allocations of that call. Cancel cannot interrupt it.
 - The workspace budget does not cap Chromium, GPU memory, or temporary copies inside shpjs and the page. A renderer crash still drops unsaved work.
-- `bngToWgs84` has two loops with no iteration limit. I did not find an in-range input that fails to finish.
-- Bundled proj4, in `core/vendor/shp.js`, has an unbounded Mollweide loop (`while (true)` in the forward path). I did not build a `.prj` that hits it. Cancel can terminate the worker. A hang there is still inside the worker, not a shell command.
+- Bundled proj4, in `core/vendor/shp.js`, has an unbounded Mollweide loop in the forward path. Patching it in place would break the pinned SHA-256 and the byte-for-byte upstream release check. The loop runs in the import worker, which Cancel can terminate.
 - A swapped file can still change which bytes are served, up to the size captured when the response starts, if [pull request 18](https://github.com/thebytorsnowdog/omamap/pull/18) lands. Without that change, the host streams until EOF.
 - Tile servers still see the viewed area, the client IP address, and the User-Agent. I am not sure whether client hints add a browser version on top of that.
 - Qt WebEngine and its Chromium build come from the operating system. I did not compare that build with upstream advisories. Keep the system packages updated.
