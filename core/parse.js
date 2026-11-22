@@ -266,15 +266,20 @@
   // Accurate to roughly 5 m, which suits viewing and inspection.
 
   const BNG = { minE: 0, maxE: 700000, minN: 0, maxN: 1300000 };
+  const BNG_LATITUDE_ITERATION_LIMIT = 16;
 
   function inBng(e, n) { return e >= BNG.minE && e <= BNG.maxE && n >= BNG.minN && n <= BNG.maxN; }
 
   function bngToWgs84(easting, northing) {
+    if (!Number.isFinite(easting) || !Number.isFinite(northing) || !inBng(easting, northing)) {
+      throw new RangeError("A coordinate is outside the British National Grid area.");
+    }
     const a = 6377563.396, b = 6356256.909, F0 = 0.9996012717;
     const lat0 = 49 * Math.PI / 180, lon0 = -2 * Math.PI / 180, N0 = -100000, E0 = 400000;
     const e2 = 1 - (b * b) / (a * a), n = (a - b) / (a + b), n2 = n * n, n3 = n2 * n;
-    let lat = lat0, M = 0;
+    let lat = lat0, M = 0, iterations = 0;
     do {
+      if (iterations++ === BNG_LATITUDE_ITERATION_LIMIT) throw new Error("British National Grid latitude did not converge.");
       lat = (northing - N0 - M) / (a * F0) + lat;
       const dl = lat - lat0, sl = lat + lat0;
       M = b * F0 * ((1 + n + 1.25 * n2 + 1.25 * n3) * dl
@@ -311,7 +316,9 @@
     const aW = 6378137, bW = 6356752.3142, e2W = 1 - (bW * bW) / (aW * aW);
     const p = Math.sqrt(x2 * x2 + y2 * y2);
     let phi = Math.atan2(z2, p * (1 - e2W)), prev;
+    iterations = 0;
     do {
+      if (iterations++ === BNG_LATITUDE_ITERATION_LIMIT) throw new Error("WGS84 latitude did not converge.");
       prev = phi;
       const nuW = aW / Math.sqrt(1 - e2W * Math.sin(phi) * Math.sin(phi));
       phi = Math.atan2(z2 + e2W * nuW * Math.sin(phi), p);
