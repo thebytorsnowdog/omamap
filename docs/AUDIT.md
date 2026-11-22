@@ -4,7 +4,7 @@ This pass reviewed OmaMap at `486404e` on `main`. It is a source review of the d
 
 ## What I checked
 
-There is no account or server session. The trust boundary is the user account, files and profiles the user opens, other local users, and the basemap tile servers. Data files are parsed in `core/parse.js` (a worker for most formats, the page for KML and GPX) and drawn by `core/app.js`. The host in `host/` serves that page on `omamap://app`, filters network requests, and accepts same-user file opens over a Unix socket.
+There is no account or server session. The trust boundary is the user account, files and profiles the user opens, other local users, and the basemap tile servers. Data files are parsed in `core/parse.js`, normally in a worker, and drawn by `core/app.js`. The host in `host/` serves that page on `omamap://app`, filters network requests, and accepts same-user file opens over a Unix socket.
 
 I read the import, profile, table, style, spatial-index, and point-drawing paths, and the host scheme, request filter, download, IPC, recent-file, profile-save, theme, and core-directory checks. I read `omarchy-plugin/BarWidget.qml`, the Arch package recipe, the CI workflows, and `scripts/check-vendor-advisories.py`. I did not read every line of the vendored Leaflet, shpjs, fflate, Papa Parse, or togeojson builds. I read where OmaMap calls them and spot-checked loops in the bundled proj4 code.
 
@@ -23,15 +23,17 @@ First-party display code puts file values in text nodes or attributes. The fixed
 
 I did not restyle the interface, rename modules, or change vendored files. The vendored hashes match published releases, and the advisory check found nothing to upgrade. I did not change `crossOrigin: true` on tile layers. That flag makes the image request send an `Origin` header. I could not run the Qt window here, so I did not check whether the tiles still load without it. The request filter already clears `Referer` and sets the User-Agent. I did not confirm whether Chromium still adds `Sec-CH-UA` client hints after that interceptor.
 
-Numeric range classification still sorts its values in one step inside `buildRanges` in `core/style.js`. The table sort already yields. KML and GPX still call `DOMParser.parseFromString` in one step. Replacing that is a new parser, not a small patch. The 512 MiB workspace figure is still an estimate, not a process limit. Lowering it would change which files open.
+Numeric range classification still sorts its values in one step inside `buildRanges` in `core/style.js`. The table sort already yields. The 512 MiB workspace figure is still an estimate, not a process limit. Lowering it would change which files open.
 
-## Follow-up fix
+## Follow-up fixes
 
 `bngToWgs84` rejects non-finite or out-of-range British National Grid coordinates and throws if either latitude calculation fails to converge within 16 iterations. Regression tests pin the original WGS84 results for five reference points and all four grid corners.
 
+Loose and archived KML and GPX now run the sliced XML scanner from pull request 28 in the import worker. Cancel terminates the worker, rejects the pending import, and clears the loading state. The next import starts a fresh worker. Imports retain the 100 MiB XML file cap, and the scanner still enforces XML structure limits and rejects `DOCTYPE` and `ENTITY` declarations. Worker XML conversion checks a 60-second budget at scanner slice boundaries and after validation. [Pull request 28](https://github.com/thebytorsnowdog/omamap/pull/28)
+
 ## Remaining risks
 
-- KML and GPX can still pause the window inside `DOMParser.parseFromString`. Counting placemarks and rejecting `DOCTYPE` and `ENTITY` run first. They do not cap the time or the DOM allocations of that call. Cancel cannot interrupt it.
+- If the worker cannot start, KML and GPX fall back to the page's sliced scanner. Cancel takes effect between slices. The worker's elapsed-time check also takes effect between slices, so an individual step can run past the deadline.
 - The workspace budget does not cap Chromium, GPU memory, or temporary copies inside shpjs and the page. A renderer crash still drops unsaved work.
 - Bundled proj4, in `core/vendor/shp.js`, has an unbounded Mollweide loop in the forward path. Patching it in place would break the pinned SHA-256 and the byte-for-byte upstream release check. The loop runs in the import worker, which Cancel can terminate.
 - A swapped file can still change which bytes are served, up to the size captured when the response starts, if [pull request 18](https://github.com/thebytorsnowdog/omamap/pull/18) lands. Without that change, the host streams until EOF.

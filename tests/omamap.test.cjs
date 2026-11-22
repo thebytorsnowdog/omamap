@@ -11,15 +11,23 @@ function runCore(context, ...files) {
   for (const file of files) vm.runInContext(fs.readFileSync(path.join(__dirname, "../core", file), "utf8"), context);
 }
 
-function application() {
+function application(Worker) {
   const notices = [], stored = new Map([["omamap.basemap", "satellite"]]);
+  const elements = new Map();
   const context = vm.createContext({
-    OmaParse,
+    OmaParse, Worker, performance, setTimeout,
     window: { localStorage: { getItem: (key) => stored.get(key), setItem: (key, value) => stored.set(key, value) } },
-    document: { addEventListener() {}, getElementById: () => ({ addEventListener() {} }), querySelectorAll: () => [] },
+    document: {
+      addEventListener() {}, querySelectorAll: () => [],
+      getElementById(id) {
+        if (!elements.has(id)) elements.set(id, { hidden: true, addEventListener(type, fn) { this[type] = fn; } });
+        return elements.get(id);
+      }
+    },
     Table: { wire() {}, onDatasetsChanged() {} },
-    tiles: [], views: [], notices,
+    tiles: [], views: [], recordNotice: (...args) => notices.push(args),
     L: {
+      latLngBounds: () => ({ extend() {} }),
       tileLayer: (url) => url,
       layerGroup: (urls) => ({ addTo() { context.tiles.push(...urls); return this; } })
     }
@@ -28,17 +36,79 @@ function application() {
   vm.runInContext(`
     const noop = () => {};
     renderBasemapButtons = applyTheme = wireDragDrop = wireKeys = renderLayerList = setStatus = noop;
-    clearSelection = renderLegend = disposeDataset = setLoading = noop;
-    prepareDataset = (saved) => saved;
-    attachDataset = (ds) => STATE.datasets.push(ds);
-    runSliced = async (stage) => stage;
+    clearSelection = renderLegend = disposeDataset = noop;
+    prepareDataset = function* (saved) { return saved; };
+    attachDataset = (ds) => { ds.layer = { getBounds: noop }; ds.featureCount = ds.geojson.features.length; STATE.datasets.push(ds); };
+    fitBounds = noop;
     initMap = () => { STATE.map = { setView: (center, zoom) => views.push([...center, zoom]), removeLayer: noop }; };
-    toast = (...args) => notices.push(args);
-    Parser.start = noop;
+    toast = recordNotice;
     boot();
   `, context);
   return { context, stored, notices };
 }
+
+test("Cancel terminates a pending XML worker, resets loading and allows another import", async () => {
+  const workers = [];
+  let reportPost;
+  const posted = () => new Promise((resolve) => { reportPost = resolve; });
+  class Worker {
+    constructor(url) {
+      assert.equal(url, "parse-worker.js");
+      workers.push(this);
+    }
+    postMessage(message, transfer) { reportPost({ message, transfer }); }
+    terminate() { this.terminated = true; }
+  }
+
+  const { context, notices } = application(Worker);
+  const parser = vm.runInContext("Parser", context);
+  const spinner = context.document.getElementById("loading");
+  const file = (name, xml) => ({ name, arrayBuffer: () => new TextEncoder().encode(xml).buffer });
+  const firstPost = posted();
+  const loading = context.handleFiles([file("slow.kml", "<kml/>")]);
+  const job = await Promise.race([firstPost, loading]);
+  assert.ok(job, "KML is sent to the worker");
+  assert.equal(job.message.name, "slow.kml");
+  assert.equal(job.transfer[0], job.message.buffer);
+  assert.equal(spinner.hidden, false);
+  const pending = parser.jobs.get(job.message.id);
+  assert.ok(pending);
+  context.document.getElementById("loading-cancel").click();
+  await loading;
+  assert.equal(workers[0].terminated, true);
+  assert.equal(workers.length, 1, "replacement waits for the next import");
+  assert.equal(parser.worker, null);
+  assert.equal(parser.jobs.size, 0);
+  assert.equal(spinner.hidden, true);
+  assert.equal(vm.runInContext("cancelledLoad", context), false);
+  assert.deepEqual(notices, [["Loading cancelled", "slow.kml", "warn"]]);
+  assert.equal(vm.runInContext("STATE.datasets.length", context), 0);
+
+  const nextPost = posted();
+  const next = context.handleFiles([file("next.gpx", '<gpx><wpt lat="51" lon="-1"/></gpx>')]);
+  const reply = await Promise.race([nextPost, next]);
+  assert.ok(reply, "GPX is sent to the replacement worker");
+  const datasets = await OmaParse.parseBytes(reply.message.name, reply.message.buffer);
+  // Ignore a late error delivery from the terminated worker while the new job runs.
+  workers[0].onerror({ preventDefault() {} });
+  workers[1].onmessage({ data: { id: reply.message.id, ok: true, datasets } });
+  await next;
+  assert.equal(workers.length, 2);
+  assert.equal(spinner.hidden, true);
+  assert.equal(vm.runInContext("STATE.datasets[0].name", context), "next");
+});
+
+test("a host without workers can still import loose KML through the sliced fallback", async () => {
+  const { context, notices } = application();
+  const xml = "<kml><Placemark><Point><coordinates>1,2</coordinates></Point></Placemark></kml>";
+  const buffer = new TextEncoder().encode(xml).buffer;
+  await context.handleFiles([{ name: "local.kml", arrayBuffer: () => buffer }]);
+  assert.equal(vm.runInContext("Parser.failed", context), true);
+  assert.equal(vm.runInContext("STATE.datasets[0].name", context), "local");
+  assert.deepEqual(vm.runInContext("STATE.datasets[0].geojson.features[0].geometry.coordinates", context), [1, 2]);
+  assert.equal(context.document.getElementById("loading").hidden, true);
+  assert.deepEqual(notices, []);
+});
 
 test("OmaMap profile restore keeps None through legacy preferences and online profile metadata", async () => {
   const { context, stored } = application();

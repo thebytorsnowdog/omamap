@@ -32,7 +32,8 @@
     xmlDepth: 64,                       // elements open at once in one KML or GPX file
     xmlElements: 6000000,               // tags in one KML or GPX file
     xmlAttributes: 64,                  // attributes on one tag
-    xmlNames: 4096                      // distinct tag names in one KML or GPX file
+    xmlNames: 4096,                     // distinct tag names in one KML or GPX file
+    xmlMilliseconds: 60000              // synchronous XML conversion, checked between slices
   });
 
   const FORBIDDEN_PROPERTY_NAMES = ["__proto__", "prototype", "constructor"];
@@ -1355,11 +1356,21 @@
     return validateFeatureCollection({ type: "FeatureCollection", features: features });
   }
 
-  function xmlToGeoJSON(text, ext) {
-    const job = xmlToGeoJSONSteps(text, ext);
+  function drainXml(job) {
+    const deadline = performance.now() + LIMITS.xmlMilliseconds;
     let step;
-    do { step = job.next(); } while (!step.done);
+    do {
+      step = job.next();
+      if (performance.now() >= deadline) {
+        job.return();
+        throw new Error("XML conversion exceeded the " + LIMITS.xmlMilliseconds / 1000 + " second time limit.");
+      }
+    } while (!step.done);
     return step.value;
+  }
+
+  function xmlToGeoJSON(text, ext) {
+    return drainXml(xmlToGeoJSONSteps(text, ext));
   }
 
   /* ------------------------------- ZIP ----------------------------------- */
@@ -1604,7 +1615,7 @@
 
   /* A ZIP may hold several layers. Each becomes its own dataset so they can be
      shown, hidden and inspected separately. */
-  async function zipToDatasets(arrayBuffer, zipName) {
+  async function zipToDatasets(arrayBuffer, zipName, runXml) {
     let entries;
     try { entries = extractZip(arrayBuffer); }
     catch (error) { throw new Error("Could not read ZIP: " + safeMessage(error, "invalid or unsupported archive.")); }
@@ -1631,15 +1642,13 @@
       } else if (filename.endsWith(".csv")) {
         counted(withNotes(label, csvToGeoJSON(decodeText(bytes))));
       } else if (/\.(kml|gpx)$/.test(filename)) {
-        // The page converts the text in slices (resolveXmlLayers) so Cancel
-        // can stop a large track between chunks.
         if (bytes.length > LIMITS.fileBytes) throw new Error(filename + " is too large (limit " + Math.round(LIMITS.fileBytes / 1048576) + " MiB).");
         const ext = filename.slice(-3), text = decodeText(bytes);
         counted({ name: label, xml: { ext: ext, text: text, items: precheckXml(text, ext) }, warnings: [] });
       }
     }
     if (!layers.length) throw new Error("ZIP contains no shapefile, GeoJSON, CSV, KML or GPX layers.");
-    return layers;
+    return resolveXmlLayers(layers, runXml);
   }
 
   /* ------------------------------ Profiles -------------------------------- */
@@ -1796,12 +1805,12 @@
     return { name: name, geojson: fc, warnings: notes };
   }
 
-  /* Parse one file's bytes into a list of { name, geojson, warnings } datasets.
-     KML/GPX are routed to xmlToGeoJSON by the caller on the main thread. */
-  async function parseBytes(name, buffer) {
+  /* Parse one file's bytes into datasets or a profile. The page supplies a
+     sliced XML runner when workers are unavailable. */
+  async function parseBytes(name, buffer, runXml = drainXml) {
     const ext = extOf(name);
     const display = baseName(name) || "Untitled";
-    if (ext === "zip" || ext === "kmz") return zipToDatasets(buffer, name);
+    if (ext === "zip" || ext === "kmz") return zipToDatasets(buffer, name, runXml);
     if (buffer.byteLength > LIMITS.fileBytes) throw new Error("File is too large (limit " + Math.round(LIMITS.fileBytes / 1048576) + " MiB).");
     const text = decodeText(new Uint8Array(buffer));
     if (ext === "csv" || ext === "tsv" || ext === "txt") return [withNotes(display, csvToGeoJSON(text))];
@@ -1811,21 +1820,17 @@
       if (ext === "omamap") throw new Error("This is not an OmaMap profile.");
       return [withNotes(display, geoJsonFromData(data))];
     }
-    if (ext === "kml" || ext === "gpx") return [{ name: display, geojson: xmlToGeoJSON(text, ext) }];
+    if (ext === "kml" || ext === "gpx") return [{ name: display, geojson: await runXml(xmlToGeoJSONSteps(text, ext)) }];
     // Unknown extension: try JSON, then CSV.
     try { return [withNotes(display, jsonToGeoJSON(text))]; }
     catch (e) { return [withNotes(display, csvToGeoJSON(text))]; }
   }
 
-  /* On the page: convert KML / GPX layers that came back from a ZIP, then
-     re-check the per-file feature total with the exact counts. `run` drives
-     a generator (time-sliced and cancellable in the app). */
-  async function resolveXmlLayers(datasets, run) {
-    if (!Array.isArray(datasets)) return datasets;
-    run = run || function (job) { let step; do { step = job.next(); } while (!step.done); return step.value; };
+  // Convert archive XML and re-check the per-file feature total with exact counts.
+  async function resolveXmlLayers(datasets, runXml) {
     for (const d of datasets) {
       if (!d.xml) continue;
-      d.geojson = await run(xmlToGeoJSONSteps(d.xml.text, d.xml.ext));
+      d.geojson = await runXml(xmlToGeoJSONSteps(d.xml.text, d.xml.ext));
       delete d.xml;
     }
     const total = datasets.reduce(function (sum, d) { return sum + d.geojson.features.length; }, 0);
@@ -1856,7 +1861,6 @@
     csvToGeoJSON: csvToGeoJSON,
     xmlToGeoJSON: xmlToGeoJSON,
     xmlToGeoJSONSteps: xmlToGeoJSONSteps,
-    resolveXmlLayers: resolveXmlLayers,
     inspectZipMetadata: inspectZipMetadata,
     bngToWgs84: bngToWgs84,
     PROFILE_VERSION: PROFILE_VERSION,

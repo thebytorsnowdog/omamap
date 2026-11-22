@@ -882,13 +882,12 @@ class LoadCancelled extends Error {}
 const Parser = {
   worker: null,
   failed: false,
-  crashes: 0,
   jobs: new Map(),
   nextJob: 1,
   fallbackReady: null,
 
   start: function () {
-    if (this.failed) return;
+    if (this.worker || this.failed) return;
     let worker;
     try { worker = new Worker("parse-worker.js"); }
     catch (e) { this.failed = true; return; }
@@ -899,25 +898,25 @@ const Parser = {
       this.jobs.delete(e.data.id);
       if (e.data.ok) job.resolve(e.data.datasets); else job.reject(new Error(e.data.error));
     };
-    worker.onmessageerror = () => this.stop(new Error("The parsed data could not be passed back to the map."));
+    worker.onmessageerror = () => {
+      if (this.worker === worker) this.stop(new Error("The parsed data could not be passed back to the map."));
+    };
     worker.onerror = (e) => {
       e.preventDefault();
+      if (this.worker !== worker) return;
       // Before any job has run this means workers are unusable here.
-      if (!this.jobs.size && !this.everRan) { this.worker = null; this.failed = true; worker.terminate(); return; }
-      this.crashes++;
+      if (!this.everRan) this.failed = true;
       this.stop(new Error("The file reader stopped unexpectedly. The file may be too large for the available memory."));
     };
   },
 
-  // Fail every in-flight job and start a fresh worker for later ones.
+  // Fail every in-flight job. The next import creates a fresh worker.
   stop: function (reason) {
     if (this.worker) this.worker.terminate();
     this.worker = null;
     const pending = Array.from(this.jobs.values());
     this.jobs.clear();
     pending.forEach(function (job) { job.reject(reason); });
-    if (this.crashes > 3) this.failed = true;   // keep crashing: stop trying workers
-    else this.start();
   },
 
   cancel: function () {
@@ -939,21 +938,24 @@ const Parser = {
     return this.fallbackReady;
   },
 
-  runLocal: function (message) {
-    return this.loadFallback().then(function () {
-      if (message.kind === "shapefile-set") return OmaParse.parseShapefileSet(message.name, message.parts);
-      return OmaParse.parseBytes(message.name, message.buffer);
-    });
+  runLocal: async function (message) {
+    const ext = OmaParse.extOf(message.name);
+    if (message.kind !== "file" || (ext !== "kml" && ext !== "gpx")) await this.loadFallback();
+    if (cancelledLoad) throw new LoadCancelled("Loading cancelled.");
+    if (message.kind === "shapefile-set") return OmaParse.parseShapefileSet(message.name, message.parts);
+    return OmaParse.parseBytes(message.name, message.buffer, runSliced);
   },
 
   run: function (message, transfer) {
-    if (!this.worker || this.failed) return this.runLocal(message);
+    if (cancelledLoad) return Promise.reject(new LoadCancelled("Loading cancelled."));
+    this.start();
+    if (!this.worker) return this.runLocal(message);
     return new Promise((resolve, reject) => {
       const id = this.nextJob++;
       message.id = id;
+      this.worker.postMessage(message, transfer || []);
       this.everRan = true;
       this.jobs.set(id, { resolve: resolve, reject: reject });
-      this.worker.postMessage(message, transfer || []);
     });
   }
 };
@@ -968,15 +970,7 @@ async function parseOne(file) {
   const limit = ext === "zip" || ext === "kmz" ? OmaParse.LIMITS.zipBytes : OmaParse.LIMITS.fileBytes;
   if (typeof file.size === "number" && file.size > limit) throw new Error("File is too large (limit " + Math.round(limit / 1048576) + " MiB).");
   const buffer = await readBuffer(file);
-  if (ext === "kml" || ext === "gpx") {
-    // KML and GPX stay on the page so Cancel can stop the scanner between
-    // slices. The scanner does not use DOMParser.
-    if (buffer.byteLength > OmaParse.LIMITS.fileBytes) throw new Error("File is too large.");
-    const text = new TextDecoder("utf-8").decode(buffer);
-    return [{ name: OmaParse.baseName(file.name), geojson: await runSliced(OmaParse.xmlToGeoJSONSteps(text, ext)) }];
-  }
-  // KML / GPX inside a ZIP or KMZ come back as text for the page to convert.
-  return OmaParse.resolveXmlLayers(await Parser.run({ kind: "file", name: file.name, buffer: buffer }, [buffer]), runSliced);
+  return Parser.run({ kind: "file", name: file.name, buffer: buffer }, [buffer]);
 }
 
 async function parseShapefileSet(stem, group) {
@@ -1063,6 +1057,7 @@ async function loadFiles(files) {
     }
   }
   } finally {
+    cancelledLoad = false;
     setLoading(false);
   }
   renderLayerList();
